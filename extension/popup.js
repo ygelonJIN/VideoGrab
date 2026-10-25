@@ -174,7 +174,7 @@ function detailEl(item) {
   } else if (d.loading) {
     thumb = '<div class="ph">抓预览帧…</div>';
   } else if (d.err) {
-    thumb = '<div class="ph">无法预览</div>';
+    thumb = `<div class="ph">无法预览<br><span class="ph-sub">${esc(String(d.err).slice(0, 80))}</span></div>`;
   } else {
     thumb = '<div class="ph">无预览</div>';
   }
@@ -206,7 +206,7 @@ function detailEl(item) {
       <div class="info">
         ${facts.length ? `<div class="facts">${facts.map(esc).join('<i>·</i>')}</div>` : '<div class="facts dim">暂无元信息</div>'}
         ${streamFacts.length ? `<div class="facts soft">${streamFacts.map(esc).join('<i>·</i>')}</div>` : ''}
-        ${d.err ? `<div class="hintline">预览要助手带 Referer 抓帧：<a href="#" data-act="copydir">复制启动命令</a></div>` : ''}
+        ${d.err ? `<div class="hintline">${errHint(d.err)}</div>` : ''}
       </div>
     </div>
     ${hls?.type === 'master' ? variantsHtml(hls) : ''}
@@ -215,6 +215,20 @@ function detailEl(item) {
     </div>
   `;
   return li;
+}
+
+function errHint(err) {
+  const e = String(err || '');
+  if (/未知消息/.test(e)) {
+    return '后台代码还是旧的：去 chrome://extensions 点这个扩展卡片上的刷新按钮，然后重开面板。';
+  }
+  if (/Failed to fetch|NetworkError|ECONNREFUSED|助手|HTTP 500/.test(e)) {
+    return '助手没在跑。<a href="#" data-act="copydir">复制启动命令</a> 到终端执行，窗口留着别关。';
+  }
+  if (/40[13]|Forbidden|access denied/i.test(e)) {
+    return '源站拒绝了这次请求：多半是链接过期，回页面重新播一次。';
+  }
+  return '可以点「复制 ffmpeg 命令」手动跑，终端里的报错更具体。';
 }
 
 function variantsHtml(master) {

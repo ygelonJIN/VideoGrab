@@ -186,6 +186,10 @@ footer .hint { margin-right: auto; }
 .detail .thumb .ph {
   color: #8b929c; font-size: 11px; text-align: center; padding: 0 8px; line-height: 1.5;
 }
+.detail .thumb .ph-sub {
+  display: block; margin-top: 3px; font-size: 10px; opacity: .75;
+  word-break: break-all; max-height: 32px; overflow: hidden;
+}
 
 .detail .info { flex: 1; min-width: 0; }
 .detail .facts {
