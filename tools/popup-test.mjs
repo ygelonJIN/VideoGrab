@@ -73,13 +73,50 @@ function makeChrome() {
           case 'aria2:status': return {
             ok: true, dead: [], list: [
               { gid: 'g1', name: 'movie.mp4', kind: 'MP4', status: 'active', totalLength: 1000, completedLength: 512, downloadSpeed: 2048, connections: 8, errorMessage: '', files: [{ path: '/Users/x/Downloads/VideoGrab/movie.mp4' }] },
-              { gid: 'g2', name: 'old.mp4', kind: 'MP4', status: 'complete', totalLength: 200, completedLength: 200, downloadSpeed: 0, connections: 0, errorMessage: '', files: [{ path: '/Users/x/Downloads/VideoGrab/old.mp4' }] }
+              { gid: 'g2', name: 'old.mp4', kind: 'MP4', status: 'complete', totalLength: 200, completedLength: 200, downloadSpeed: 0, connections: 0, errorMessage: '', exists: true, files: [{ path: '/Users/x/Downloads/VideoGrab/old.mp4' }] },
+              { gid: 'g3', name: 'gone.mp4', kind: 'MP4', status: 'complete', totalLength: 300, completedLength: 300, downloadSpeed: 0, connections: 0, errorMessage: '', exists: false, files: [{ path: '/Users/x/Downloads/VideoGrab/gone.mp4' }] }
             ]
           };
           case 'helper:jobs': return {
-            ok: true, data: { jobs: [{ id: 'h1', type: 'hls', name: 'stream.mp4', status: 'running', progress: 33, speed: 1024 }] }
+            ok: true, data: {
+              queued: 1,
+              jobs: [
+                { id: 'h1', type: 'hls', name: 'stream.mp4', status: 'running', progress: 33, speed: 1024 },
+                { id: 'h2', type: 'mp4', name: 'wait.mp4', status: 'queued', progress: 0 }
+              ]
+            }
           };
           case 'cfg:get': return { ok: true, settings: {} };
+          case 'batch:scan': return {
+            ok: true,
+            scan: {
+              source: 'dom', title: '列表',
+              listing: [{
+                template: 'site.com/watch/:id', count: 3,
+                items: [
+                  { url: 'https://site.com/watch/1', label: '' },
+                  { url: 'https://site.com/watch/2', label: '' },
+                  { url: 'https://site.com/watch/3', label: '' }
+                ]
+              }],
+              total: 3
+            }
+          };
+          case 'batch:resolve': return {
+            ok: true,
+            items: (msg.urls || []).map((u) => (
+              u.endsWith('/1')
+                ? {
+                    url: u, ok: true, gone: false, title: 'A',
+                    media: { url: 'https://cdn/v/a.mp4', kind: 'MP4', size: 10485760, headers: { ua: 'UA' }, headerMode: 'no-referer' }
+                  }
+                : u.endsWith('/2')
+                  ? { url: u, ok: false, gone: false, unavailable: true, reason: '播放器里没有媒体配置' }
+                  : { url: u, ok: false, gone: true, reason: 'HTTP 404' }
+            ))
+          };
+          case 'batch:history': return { ok: true, history: {} };
+          case 'batch:submit': return { ok: true, jobs: [{ id: 'j1', name: 'A' }], errors: [], history: {} };
           default: return { ok: true };
         }
       },
@@ -90,9 +127,17 @@ function makeChrome() {
       local: {
         get: async (k) => (k === 'jobs' ? { jobs: [{ gid: 'g1', name: 'movie.mp4', kind: 'MP4', ts: 1 }] } : {}),
         set: async () => {}
+      },
+      session: {
+        get: async () => ({}),
+        set: async () => {}
       }
     },
-    tabs: { query: async () => [{ id: 7, url: 'https://site.com/watch' }] },
+    tabs: {
+      query: async () => [{ id: 7, url: 'https://site.com/watch' }],
+      get: async (id) => ({ id, url: 'https://site.com/list' })
+    },
+    scripting: { executeScript: async () => [{ result: ['https://site.com/watch/1'] }] },
     downloads: { download: async () => 1 }
   };
 }
@@ -178,7 +223,7 @@ check('批量 aria2 发出请求', sent.includes('dl:aria2'));
 click($('#tabJobs'));
 await sleep(220);
 const jobs = $$('#jobList .job');
-check('任务面板 3 个', jobs.length === 3, String(jobs.length));
+check('任务面板 5 个', jobs.length === 5, String(jobs.length));
 check('进度条宽度', jobs[0].querySelector('.bar > i')?.style.width === '51.2%');
 const jobBtns = $$('#jobList button').map((b) => b.textContent.trim());
 check('任务按钮都是文字', jobBtns.every((t) => /^[\u4e00-\u9fa5]+$/.test(t)), jobBtns.join('/'));
@@ -189,6 +234,22 @@ check('已完成：不显示暂停', !doneJob.textContent.includes('暂停') && 
 check('已完成：有删除文件', doneJob.textContent.includes('删除文件'));
 check('已完成：有删除记录', doneJob.textContent.includes('删除记录'));
 check('已完成：样式带 done', doneJob.classList.contains('done'));
+check('已完成：显示落盘路径', doneJob.textContent.includes('~/Downloads/VideoGrab/old.mp4'), doneJob.textContent.slice(0,120));
+check('已完成：有打开文件夹', doneJob.textContent.includes('打开文件夹'));
+check('已完成：有复制路径', doneJob.textContent.includes('复制路径'));
+
+// 本地文件被删了：不能再显示"已完成"
+const goneJob = $$('#jobList .job').find((el) => el.textContent.includes('gone.mp4'));
+check('文件已删：不显示已完成', goneJob && !goneJob.textContent.includes('已完成'));
+check('文件已删：显示文件已删除', goneJob && goneJob.textContent.includes('文件已删除'));
+check('文件已删：样式带 warn', goneJob && goneJob.classList.contains('warn'));
+check('文件已删：不再挂绿条', goneJob && !goneJob.querySelector('.bar').classList.contains('done'));
+
+// 排队中的任务：别说成 0%
+const queuedJob = $$('#jobList .job').find((el) => el.textContent.includes('wait.mp4'));
+check('排队中：标明排队中', queuedJob && queuedJob.textContent.includes('排队中'));
+check('排队中：不显示 0%', queuedJob && !queuedJob.textContent.includes('0%'));
+check('任务栏统计带排队数', $('#jobStat').textContent.includes('排队 1'), $('#jobStat').textContent);
 
 // 删除文件：先确认，再发 file:delete
 click([...doneJob.querySelectorAll('button')].find((b) => b.textContent.includes('删除文件')));
@@ -235,6 +296,36 @@ check('重新检测：连上了', $('#sheetState').textContent.includes('连上�
 click($('#sheetClose'));
 await sleep(40);
 check('引导可关闭', $('#sheet').hidden === true);
+
+// 12. 批量面板：扫描完自动解析，只有解析出地址的才能勾
+click($('#tabBatch'));
+await sleep(60);
+check('批量面板可见', $('#paneBatch').hidden === false);
+check('批量初始是空状态', $('#batchEmpty').hidden === false);
+check('没扫之前全选禁用', $('#batchSelAll').disabled === true);
+
+click($('#btnScan'));
+await sleep(600);                       // 扫描 + 自动解析（假数据即时返回）
+
+const brows = $$('#batchList li.row');
+check('扫描出 3 条', brows.length === 3, String(brows.length));
+check('扫描后自动解析，不停在待解析', !$$('#batchList .chip.b-pending').length,
+  $$('#batchList .chip.b-pending').length + ' 条仍是待解析');
+check('第 1 条可下', brows[0].textContent.includes('可下'));
+check('第 2 条源已失效', brows[1].textContent.includes('源已失效'));
+check('第 3 条已下架', brows[2].textContent.includes('已下架'));
+check('可下的勾选框能点', brows[0].querySelector('.bsel').disabled === false);
+check('失效的勾选框禁用', brows[1].querySelector('.bsel').disabled === true);
+check('有可下项后全选可用', $('#batchSelAll').disabled === false);
+
+$('#batchSelAll').checked = true;
+$('#batchSelAll').dispatchEvent(new window.Event('change', { bubbles: true }));
+await sleep(60);
+check('全选只勾中可下的那条', $('#batchSelInfo').textContent.includes('已勾 1'), $('#batchSelInfo').textContent);
+
+click($('#btnBatchDown'));
+await sleep(120);
+check('加入队列发出 batch:submit', sent.includes('batch:submit'));
 
 console.log(log.join('\n'));
 console.log(`\n通过 ${pass}，失败 ${fail}`);

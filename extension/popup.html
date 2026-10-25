@@ -13,6 +13,7 @@
     <nav class="tabs">
       <button id="tabSniff" class="tab active" data-pane="sniff">嗅探<b id="cnt"></b></button>
       <button id="tabJobs" class="tab" data-pane="jobs">任务</button>
+      <button id="tabBatch" class="tab" data-pane="batch">批量</button>
     </nav>
     <button id="btnOptions" class="ghost">设置</button>
   </header>
@@ -45,6 +46,25 @@
     </div>
     <ul id="jobList" class="list"></ul>
     <div id="jobEmpty" class="empty"><p>没有任务</p></div>
+  </section>
+
+  <section id="paneBatch" class="pane" hidden>
+    <div class="toolbar">
+      <button id="btnScan" class="primary">扫描本页</button>
+      <button id="btnResolve" class="ghost">解析选中</button>
+      <button id="btnBatchRefresh" class="ghost" style="margin-left:auto">刷新状态</button>
+    </div>
+    <div id="batchHint" class="hint"></div>
+    <div class="bar-inline">
+      <label class="check"><input type="checkbox" id="batchSelAll" disabled><span>全选可用</span></label>
+      <span id="batchSelInfo" class="hint"></span>
+      <button id="btnBatchDown" class="primary">加入下载队列</button>
+    </div>
+    <ul id="batchList" class="list"></ul>
+    <div id="batchEmpty" class="empty">
+      <p>还没扫描</p>
+      <p class="sub">在视频列表页点「扫描本页」，不用点开任何视频</p>
+    </div>
   </section>
 
   <footer id="bar">

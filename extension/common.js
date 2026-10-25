@@ -316,7 +316,13 @@ export async function helperCall(settings, path, init = {}, timeoutMs = 20000) {
       signal: ctrl.signal
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `助手 HTTP ${res.status}`);
+    if (!res.ok) {
+      // 404 + not found 基本就是助手还是旧版本，没有这个接口
+      if (res.status === 404 && /not\s*found/i.test(String(data.error || ''))) {
+        throw new Error('助手还是旧版本，没有这个接口：重启一下助手再试');
+      }
+      throw new Error(data.error || `助手 HTTP ${res.status}`);
+    }
     return data;
   } catch (e) {
     if (e?.name === 'AbortError') throw new Error('助手响应超时');

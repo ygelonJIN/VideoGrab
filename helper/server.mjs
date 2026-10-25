@@ -15,11 +15,16 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
+import { discover, looksGone, pathTemplate } from './extract.mjs';
+import { extractAria2Error, describeExit } from './errors.mjs';
+import { uniqueName, splitExt } from './naming.mjs';
 
 const PORT = Number(process.env.VG_PORT || 8765);
 const HOME = os.homedir();
 const DEFAULT_OUT = path.join(HOME, 'Desktop');
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
+const DEFAULT_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const CONCURRENCY = Number(process.env.VG_CONCURRENCY || 2);
 const MAX_JOBS = 60;
 
@@ -142,16 +147,20 @@ async function fileSize(p) {
   try { return (await fsp.stat(p)).size; } catch { return 0; }
 }
 
-// 按输出文件大小估算进度（aria2c / curl 通用）
+// 按输出文件大小估算进度（curl 用；aria2 不是这样写的，见 trackAria2）
 function watchOutput(job) {
   let probing = false;
   const timer = setInterval(async () => {
     if (job.status !== 'running') return;
+    // aria2 最近 5 秒报过进度就别跟它抢：它会把整段缓存在内存里，最后才落盘，
+    // 这期间文件一直是 0 字节，按文件算永远 0%。
+    if (job._aria2At && Date.now() - job._aria2At < 5000) return;
     const size = await fileSize(job.out);
+    if (size <= 0) return;
     job.speed = Math.max(0, (size - (job._lastSize || 0)) / 0.9);
     job._lastSize = size;
-    job.received = size;
-    if (!job.total && !probing && size > 0) {
+    job.received = Math.max(job.received || 0, size);
+    if (!job.total && !probing) {
       probing = true;
       const n = await probeLength(job.url, job.headers);
       if (n) job.total = n;
@@ -162,6 +171,45 @@ function watchOutput(job) {
     }
   }, 900);
   return () => clearInterval(timer);
+}
+
+const SIZE_UNIT = {
+  B: 1, KB: 1000, MB: 1e6, GB: 1e9, TB: 1e12,
+  KiB: 1024, MiB: 1024 ** 2, GiB: 1024 ** 3, TiB: 1024 ** 4
+};
+
+function toBytes(n, unit) {
+  return Math.round(Number(n) * (SIZE_UNIT[unit] || 1));
+}
+
+/**
+ * 从 aria2 的输出里读进度。它自己会打这样的行：
+ *   [#gid 11MiB/12MiB(88%) CN:10 DL:129KiB ETA:12s]
+ * 这才是唯一可信的进度来源 —— 文件大小在下载结束前一直是 0。
+ */
+function trackAria2(job, chunk) {
+  pushLog(job, chunk);
+  const text = String(chunk);
+  let last = null;
+  for (const m of text.matchAll(/\[#[0-9a-z]+\s+([\d.]+)([A-Za-z]{1,3})\/([\d.]+)([A-Za-z]{1,3})\((\d+)%\)([^\n]*)/g)) {
+    last = m;
+  }
+  if (!last) return;
+
+  const recv = toBytes(last[1], last[2]);
+  const total = toBytes(last[3], last[4]);
+  const pct = Number(last[5]) || 0;
+  const dl = last[6].match(/DL:([\d.]+)([A-Za-z]{1,3})/);
+
+  job.received = recv;
+  if (total > 0) job.total = total;
+  job.speed = dl ? toBytes(dl[1], dl[2]) : 0;
+  job._aria2At = Date.now();
+  job.progress = Math.min(99.5, pct);
+  if (recv > (job._lastRecv || 0)) {
+    job._lastRecv = recv;
+    job._recvAt = Date.now();
+  }
 }
 
 
@@ -234,7 +282,9 @@ const HDR_SENTINEL = '__VG_HDR__';
 async function curlRange(url, headers, proxy, start, end, timeoutMs = 20000) {
   const args = ['-sS', '-f', '--max-time', String(Math.round(timeoutMs / 1000)), '-r', `${start}-${end}`];
   if (proxy) args.push('-x', proxy);
-  for (const [k, v] of headerEntries(headers)) args.push('-H', `${k}: ${v}`);
+  // 不带浏览器 UA 时 curl 会自报 curl/x.y，不少 CDN 直接 403 —— 这里统一兜底
+  const hdr = { ...headers, ua: headers?.ua || DEFAULT_UA };
+  for (const [k, v] of headerEntries(hdr)) args.push('-H', `${k}: ${v}`);
   args.push('-w', HDR_SENTINEL + '%{header_json}');
   args.push(url);
   const res = await runCapture(CURL || 'curl', args, timeoutMs + 2000);
@@ -424,7 +474,7 @@ function startJob(job) {
   } else if (ARIA2C) {
     cmd = ARIA2C;
     args = aria2Args(job, job.total);
-    tracker = (chunk) => pushLog(job, chunk);
+    tracker = (chunk) => trackAria2(job, chunk);
   } else if (CURL) {
     cmd = CURL;
     args = ['-f', '-L', '-C', '-', '-o', job.out];
@@ -445,12 +495,24 @@ function startJob(job) {
     probeLength(job.url, job.headers).then((n) => { if (n && !job.total) job.total = n; }).catch(() => {});
   }
 
+  // 卡死保护：一个任务长期一点数据都没收到，就别让它占着并发位把整队堵住
+  const stallTimer = setInterval(() => {
+    if (job.status !== 'running') return;
+    const idleSince = job._recvAt || job.startedAt || job.createdAt;
+    if ((job.received || 0) === 0 && Date.now() - idleSince > 5 * 60 * 1000) {
+      clearInterval(stallTimer);
+      try { child.kill('SIGKILL'); } catch {}
+      fail(job, '5 分钟没收到任何数据：多半是直链过期或被限速，回批量页重新解析再下');
+    }
+  }, 30000);
+
   child.stderr.on('data', (d) => tracker(d));
   child.stdout.on('data', (d) => tracker(d));
 
   child.on('error', (e) => {
     if (job._settled) return;
     job._settled = true;
+    clearInterval(stallTimer);
     stopWatch();
     fail(job, e.message);
   });
@@ -458,6 +520,7 @@ function startJob(job) {
   child.on('close', (code, signal) => {
     if (job._settled) return;
     job._settled = true;
+    clearInterval(stallTimer);
     stopWatch();
     job.child = null;
     if (job.status === 'canceled') return finish();
@@ -471,7 +534,10 @@ function startJob(job) {
     } else {
       job.status = 'error';
       job.endedAt = now();
-      job.error = job.lastLine || `进程退出码 ${code}${signal ? ' (' + signal + ')' : ''}`;
+      // aria2 只留页脚没用，要从日志里挖出 errorCode / status
+      job.error = job.type === 'hls'
+        ? (job.lastLine || describeExit(code, signal))
+        : (extractAria2Error(job.logTail) || describeExit(code, signal));
       finish();
     }
   });
@@ -509,10 +575,33 @@ function createJob(input) {
   const dir = expandHome(input.outDir) || DEFAULT_OUT;
   fs.mkdirSync(dir, { recursive: true });
   const base = sanitize(input.name, `video-${now()}`);
-  const name = type === 'hls'
+  const wanted = type === 'hls'
     ? base.replace(/\.[a-z0-9]{2,5}$/i, '') + '.mp4'
     : ensureExt(base, ext);
+
+  // 同名冲突就换名字，别让两个任务抢同一个文件（抢的结果是后到的把先到的覆盖掉）
+  const [stem, suffix] = splitExt(wanted);
+  const taken = (nm) => {
+    const target = path.join(dir, nm);
+    // 已经在队列里、还没落盘的任务也算占用（同一秒创建时磁盘上还是空的）
+    const owner = [...jobs.values()].find((j) => j.out === target);
+    if (owner) return owner.url !== input.url;      // 同一个源地址重下 = 续传，放行
+    let st = null;
+    try { st = fs.statSync(target); } catch { return false; }
+    if (fs.existsSync(target + '.aria2')) return false;   // 有控制文件，可以续传
+    if (st.size === 0) return false;                      // 0 字节残骸，下面会删掉
+    return true;                                          // 别人的成品，换名保护
+  };
+  const name = uniqueName(stem, suffix, taken);
   const out = path.join(dir, name);
+
+  // 上次失败的残骸：0 字节的成品 + 没有 .aria2 控制文件。
+  // 留着它，aria2 会直接报 errorCode=13「文件已存在」，重下永远卡在这一步。
+  try {
+    if (fs.existsSync(out) && fs.statSync(out).size === 0 && !fs.existsSync(out + '.aria2')) {
+      fs.unlinkSync(out);
+    }
+  } catch { /* 删不掉就交给 aria2 报错 */ }
 
   const job = {
     id: randomUUID().slice(0, 8),
@@ -546,13 +635,170 @@ function createJob(input) {
 }
 
 function publicJob(j) {
-  return {
+  const o = {
     id: j.id, type: j.type, name: j.name, out: j.out, url: j.url,
     status: j.status, progress: Math.round(j.progress * 10) / 10,
     speed: Math.round(j.speed || 0), received: j.received, total: j.total,
     duration: j.duration, position: j.position,
     error: j.error || '', createdAt: j.createdAt, endedAt: j.endedAt || 0
   };
+  // 结束了的任务顺手看一眼文件还在不在：本地删了就别再显示"已完成"
+  if (j.status === 'done' || j.status === 'error' || j.status === 'canceled') {
+    try { o.exists = fs.existsSync(j.out); } catch { o.exists = false; }
+  }
+  return o;
+}
+
+// ---------------------------------------------------------------- 通用抓取
+// 页面一律走 curl：能带 Referer/Cookie、能走代理、能跟 302（播放器经常先跳一次域名）
+const PAGE_MARK = '__VG_PAGE__';
+const PAGE_MAX = 4 * 1024 * 1024;
+
+async function fetchPage(url, headers = {}, proxy = '', timeoutMs = 20000) {
+  const args = ['-sS', '-L', '--compressed', '--max-time', String(Math.round(timeoutMs / 1000))];
+  if (proxy) args.push('-x', proxy);
+  args.push('-A', headers.ua || DEFAULT_UA);
+  for (const [k, v] of headerEntries(headers)) {
+    if (k !== 'User-Agent' && v) args.push('-H', `${k}: ${v}`);
+  }
+  args.push('-w', '\n' + PAGE_MARK + '%{http_code} %{url_effective}');
+  args.push(url);
+
+  const res = await runCapture(CURL || 'curl', args, timeoutMs + 3000);
+  const raw = res.out;
+  const idx = raw.lastIndexOf(PAGE_MARK);
+  let body = raw;
+  let status = 0;
+  let finalUrl = url;
+  if (idx >= 0) {
+    body = raw.subarray(0, idx);
+    const tail = raw.subarray(idx + PAGE_MARK.length).toString('utf8').trim();
+    const m = tail.match(/^(\d{3})\s+(.*)$/);
+    if (m) { status = Number(m[1]); finalUrl = m[2].trim() || url; }
+  }
+  return {
+    ok: res.code === 0,
+    status,
+    finalUrl,
+    html: body.subarray(0, PAGE_MAX).toString('utf8'),
+    err: res.err
+  };
+}
+
+const firstHeader = (v) => (Array.isArray(v) ? v[0] : v) || '';
+
+/**
+ * 探一条直链能不能下。带 Referer 和不带各试一次：
+ * 有的站防盗链，没 Referer 403；有的站反过来，带 Referer 就 403。
+ * 哪种能过就用哪种，顺便把能用的 headers 一起返回，下载端照抄即可。
+ */
+async function probeMedia(url, headers = {}, proxy = '') {
+  const headers0 = { ...headers, ua: headers.ua || DEFAULT_UA };
+  const hasReferer = Boolean(headers0.referer);
+  const attempts = hasReferer
+    ? [{ mode: 'with-referer', h: headers0 }, { mode: 'no-referer', h: { ...headers0, referer: '' } }]
+    : [{ mode: 'no-referer', h: headers0 }];
+
+  let lastError = '';
+  for (const a of attempts) {
+    const r = await curlRange(url, a.h, proxy, 0, 0, 15000);
+    if (r.code !== 0) { lastError = lastLine(r.err) || `curl ${r.code}`; continue; }
+    const ct = firstHeader(r.headers['content-type']).toLowerCase();
+    const cr = firstHeader(r.headers['content-range']);
+    const size =
+      Number((cr.match(/\/(\d+)\s*$/) || [])[1] || 0) ||
+      Number(firstHeader(r.headers['content-length']) || 0) ||
+      0;
+    const isMedia =
+      /^(?:video|audio)\//.test(ct) ||
+      /mpegurl|dash\+xml/.test(ct) ||
+      (ct.includes('octet-stream') && /\.(?:mp4|m4v|mov|webm|mkv|m3u8|mpd|ts|flv)$/i.test(url.split('?')[0]));
+    if (isMedia) {
+      const clean = { ...a.h };
+      if (a.mode === 'no-referer') clean.referer = '';
+      return { ok: true, mode: a.mode, headers: clean, size, contentType: ct };
+    }
+  }
+  return { ok: false, error: lastError || '不是媒体响应' };
+}
+
+const resolveCache = new Map();      // url -> {at, result}
+const RESOLVE_TTL = 5 * 60 * 1000;
+
+/** 抓一个详情页，拿到能直接下的一条媒体；拿不到就再钻一层播放器 iframe */
+async function resolveOne(url, headers = {}, proxy = '', depth = 0) {
+  const cached = resolveCache.get(url);
+  if (cached && Date.now() - cached.at < RESOLVE_TTL) return { ...cached.result, cached: true };
+
+  const page = await fetchPage(url, headers, proxy);
+  const found = discover(page.html, page.finalUrl || url);
+  const base = { page: { status: page.status, url: page.finalUrl }, title: found.title };
+
+  if (looksGone(page.html, page.status)) {
+    const r = { ok: false, gone: true, ...base, reason: page.status === 404 || page.status === 410 ? `HTTP ${page.status}` : '页面提示内容已删除' };
+    resolveCache.set(url, { at: Date.now(), result: r });
+    return r;
+  }
+
+  for (const m of found.media.slice(0, 4)) {
+    const probe = await probeMedia(m.url, headers, proxy);
+    if (probe.ok) {
+      const r = {
+        ok: true, gone: false, ...base,
+        media: { url: m.url, kind: m.kind, size: probe.size, contentType: probe.contentType, headers: probe.headers, headerMode: probe.mode },
+        candidates: found.media.length
+      };
+      resolveCache.set(url, { at: Date.now(), result: r });
+      return r;
+    }
+  }
+
+  if (depth < 1 && found.embeds.length) {
+    // 播放器基本都排在最前面，试前 3 个就够
+    const tried = [];
+    for (const e of found.embeds.slice(0, 3)) {
+      const r = await resolveOne(e.url, { ...headers, referer: url }, proxy, depth + 1);
+      if (r.ok) {
+        const out = { ...r, ...base, via: e.url };
+        resolveCache.set(url, { at: Date.now(), result: out });
+        return out;
+      }
+      tried.push(r);
+    }
+    if (tried.length) {
+      let host = '';
+      try { host = new URL(tried[0]?.page?.url || '').host; } catch {}
+      const gone = tried.some((x) => x.gone);
+      const first = tried.find((x) => x.reason) || {};
+      const r = {
+        ok: false,
+        gone,
+        unavailable: !gone,          // 页面还在，但里面没有可播的东西
+        ...base,
+        reason: `播放器${host ? '（' + host + '）' : ''}：${first.reason || '没解出可下地址'}`,
+        steps: tried.map((x) => ({ url: x.page?.url || '', status: x.page?.status || 0, gone: !!x.gone, reason: x.reason || '' }))
+      };
+      resolveCache.set(url, { at: Date.now(), result: r });
+      return r;
+    }
+  }
+
+  const r = { ok: false, gone: false, unavailable: false, ...base, reason: '页面里没找到能下的地址（可能是纯 JS 播放或加密流）' };
+  resolveCache.set(url, { at: Date.now(), result: r });
+  return r;
+}
+
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -563,10 +809,10 @@ const DELETE_ROOTS = [
   path.join(HOME, 'Movies')
 ].map((x) => path.resolve(x));
 
-function safeDeletePath(input) {
+function safeDeletePath(input, what = '删除') {
   const abs = path.resolve(expandHome(input));
   const ok = DELETE_ROOTS.some((root) => abs === root || abs.startsWith(root + path.sep));
-  if (!ok) throw new Error('只允许删除下载目录里的文件');
+  if (!ok) throw new Error(`只允许${what}下载目录里的文件`);
   if (!/\.[a-z0-9]{2,5}$/i.test(abs)) throw new Error('不是普通文件');
   return abs;
 }
@@ -635,6 +881,77 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { status: r.status, text: text.slice(0, 4 * 1024 * 1024) });
     }
 
+    if (p === '/api/scan' && req.method === 'POST') {
+      const body = await readBody(req);
+      const proxy = body.proxy || '';
+      const headers = body.headers || {};
+      const domLinks = Array.isArray(body.links)
+        ? [...new Set(body.links.filter((x) => /^https?:/i.test(String(x))))]
+        : [];
+
+      let page = null;
+      let found = { title: '', media: [], embeds: [], links: [], listing: [] };
+      if (body.url) {
+        page = await fetchPage(body.url, headers, proxy);
+        found = discover(page.html, page.finalUrl || body.url);
+      }
+
+      // 扩展从 DOM 抠出来的链接优先：JS 渲染的列表页，HTML 里本来就是空的
+      let listing = found.listing;
+      let source = listing.length ? 'html' : '';
+      if (domLinks.length) {
+        const groups = new Map();
+        for (const u of domLinks) {
+          const t = pathTemplate(u);
+          if (!groups.has(t)) groups.set(t, []);
+          groups.get(t).push(u);
+        }
+        listing = [...groups.entries()]
+          .map(([template, urls]) => ({
+            template, count: urls.length,
+            items: urls.map((u) => ({ url: u, label: '' }))
+          }))
+          .sort((a, b) => b.count - a.count);
+        source = 'dom';
+      }
+
+      return json(res, 200, {
+        ok: true,
+        source,
+        title: found.title,
+        page: page ? { status: page.status, url: page.finalUrl } : null,
+        media: found.media.slice(0, 12),
+        listing: listing.slice(0, 30),
+        total: listing.reduce((n, g) => n + g.count, 0)
+      });
+    }
+
+    if (p === '/api/resolve' && req.method === 'POST') {
+      const body = await readBody(req);
+      const proxy = body.proxy || '';
+      const headers = body.headers || {};
+      const urls = Array.isArray(body.urls) ? body.urls.filter(Boolean) : (body.url ? [body.url] : []);
+      if (!urls.length) return json(res, 400, { error: '缺 url' });
+      if (urls.length > 20) return json(res, 400, { error: '一次最多 20 条，分批来' });
+
+      const out = await mapLimit(urls, 3, async (u) => {
+        try {
+          return { url: u, ...(await resolveOne(u, headers, proxy, 0)) };
+        } catch (e) {
+          return { url: u, ok: false, gone: false, reason: e?.message || String(e) };
+        }
+      });
+
+      const summary = {
+        ok: out.filter((x) => x.ok).length,
+        gone: out.filter((x) => x.gone).length,
+        unavailable: out.filter((x) => x.unavailable).length,
+        failed: out.filter((x) => !x.ok && !x.gone && !x.unavailable).length
+      };
+      if (!Array.isArray(body.urls)) return json(res, 200, { ...out[0], summary });
+      return json(res, 200, { items: out, summary });
+    }
+
     if (p === '/api/probe' && req.method === 'POST') {
       const body = await readBody(req);
       if (!body.url) return json(res, 400, { error: '缺 url' });
@@ -687,6 +1004,35 @@ const server = http.createServer(async (req, res) => {
           try { await fsp.unlink(target); removed = true; } catch (e) { if (e.code !== 'ENOENT') throw e; }
         }
         return json(res, 200, { ok: true, removed, path: abs });
+      } catch (e) {
+        return json(res, 400, { error: e.message });
+      }
+    }
+
+    if (p === '/api/files/exists' && req.method === 'POST') {
+      const body = await readBody(req);
+      const list = Array.isArray(body.paths) ? body.paths.slice(0, 50) : [];
+      const exists = {};
+      for (const raw of list) {
+        if (typeof raw !== 'string' || !raw) continue;
+        const abs = path.resolve(expandHome(raw));
+        // 只回答 home 和外接盘里的路径，别把它变成全盘探测工具
+        const allowed = abs.startsWith(HOME + path.sep) || abs.startsWith('/Volumes/');
+        if (!allowed) { exists[raw] = null; continue; }
+        try { exists[raw] = fs.existsSync(abs) && fs.statSync(abs).isFile(); }
+        catch { exists[raw] = false; }
+      }
+      return json(res, 200, { ok: true, exists });
+    }
+
+    if (p === '/api/file/reveal' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!body.path) return json(res, 400, { error: '缺 path' });
+      try {
+        const abs = safeDeletePath(body.path, '打开');   // 和删除共用同一套白名单
+        if (!fs.existsSync(abs)) return json(res, 404, { error: '文件已经不在了' });
+        spawn('open', ['-R', abs], { detached: true, stdio: 'ignore' }).unref();
+        return json(res, 200, { ok: true, path: abs });
       } catch (e) {
         return json(res, 400, { error: e.message });
       }

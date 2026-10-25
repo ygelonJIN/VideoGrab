@@ -275,3 +275,45 @@ kbd {
   border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
   padding: 0 3px; background: var(--soft);
 }
+
+/* ---------------------------------------------------------------- 批量面板 */
+.bar-inline {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--soft);
+}
+.bar-inline .check { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+.bar-inline button { margin-left: auto; }
+
+.row.batch .sub { align-items: flex-start; }
+.row.batch .why {
+  flex: 1 1 100%;
+  color: var(--muted); font-size: 11px; line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.chip {
+  display: inline-block;
+  padding: 1px 6px; border-radius: 5px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .2px;
+  border: 1px solid transparent;
+  background: var(--soft); color: var(--muted);
+}
+.chip.b-ok { background: color-mix(in srgb, var(--green) 13%, transparent); color: var(--green); }
+.chip.b-pending { background: var(--soft); color: var(--muted); }
+.chip.b-gone { background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--red); }
+.chip.b-fail { background: color-mix(in srgb, var(--amber) 14%, transparent); color: var(--amber); }
+.chip.b-saved { background: var(--blue-soft); color: var(--blue); }
+.chip.b-warn { background: color-mix(in srgb, var(--amber) 16%, transparent); color: var(--amber); }
+
+.job.warn .j-name { color: var(--amber); font-weight: 550; }
+.job.warn .j-err { color: var(--amber); }
+
+/* 下载落盘的完整路径：助手默认 ~/Desktop，文件名是网页标题，不写出来根本找不到 */
+.job .j-path {
+  font: 11px/1.4 "SF Mono", ui-monospace, Menlo, monospace;
+  color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;      /* 路径太长时优先保留文件名和末级目录 */
+}

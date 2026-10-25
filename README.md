@@ -98,10 +98,13 @@ launchctl load ~/Library/LaunchAgents/com.videograb.helper.plist
 4. **MP4 / WebM 这类完整文件** → 点 `aria2 下载`（多线程）；没开 aria2 就先 `浏览器下载`。
 5. **M3U8 / DASH** → 展开后点 `复制 ffmpeg 命令` 粘到终端，或 `交给助手` 后台跑，进度在「任务」里看。
 6. **批量**：勾选多条 → `aria2 下载`；或 `导出清单` 后在终端 `aria2c -i 那个文件.txt`。
-7. **任务面板**：
+7. **列表页批量抓（不用点开视频）**：切到「批量」页 → `扫描本页`，扫完会**自动开始解析**（5 条一批，进度在列表上方）→ 勾选「可下」→ `加入下载队列`。
+   列表常常是懒加载的，所以链接是从页面 DOM 里读的，不是猜的。解析结果分三种：可下 / 源已失效（托管端没文件了）/ 已下架（页面 404）。
+   只有解析出地址的条目能勾选；结果存在 `storage.session` 里，弹窗关了再打开还在。
+8. **任务面板**：
    - 进行中 → 「暂停 / 取消」
    - 已完成 / 出错 → 「删除文件」（连磁盘文件一起删，有二次确认）、「删除记录」（只从列表里去掉，文件还在）
-   - 助手合并的任务同样是这一套
+   - 助手合并的任务同样是这一套；已完成但本地文件被你删了的，会显示「文件已删除」而不是「已完成」
 
 分片 `.ts` 默认折叠，设置里可以打开。
 
@@ -118,10 +121,12 @@ extension/          Chrome 扩展（MV3）
   options.*         设置页
   icons/
 helper/             本地助手（Node，无依赖）
-  server.mjs        /api/health /api/parse /api/jobs
+  server.mjs        /api/health /api/parse /api/jobs /api/scan /api/resolve
+  extract.mjs       通用媒体发现器（直出 / 打包配置 / 播放器嵌入），纯函数
   start.sh
   com.videograb.helper.plist
 tools/              自测
+  extract-test.mjs  通用发现器（合成 HTML，不联网）
   selftest.mjs      common + background 逻辑（假 chrome API）
   popup-test.mjs    弹窗渲染（jsdom）
   cdp-test.mjs      真浏览器端到端（需要 Chromium，品牌版 Chrome 不行）
@@ -132,8 +137,9 @@ tools/              自测
 ## 自测
 
 ```bash
-node tools/selftest.mjs     # 52 项：类型识别、m3u8、aria2 参数、ffmpeg 命令、嗅探逻辑
-node tools/popup-test.mjs   # 23 项：列表渲染、解析面板、任务面板、筛选
+node tools/extract-test.mjs  # 47 项：通用发现器 + aria2 错误提取 + 文件名去重，全合成数据
+node tools/selftest.mjs      # 60 项：类型识别、m3u8、aria2 参数、ffmpeg 命令、嗅探逻辑
+node tools/popup-test.mjs    # 61 项：列表渲染、解析面板、任务面板、筛选、批量面板、已删文件、排队
 ```
 
 `popup-test.mjs` 依赖 jsdom，先 `mkdir -p /tmp/vgdom && cd /tmp/vgdom && npm i jsdom`。
@@ -157,6 +163,15 @@ node tools/popup-test.mjs   # 23 项：列表渲染、解析面板、任务面�
 | 删除文件报「只允许删除下载目录里的文件」 | 文件不在 `~/Downloads`、`~/Desktop`、`~/Movies` 下，改用「删除记录」自己手动删 |
 | 详情要 20 秒以上 | 索引不在文件开头（非 faststart）时会退回去读尾部 512 KB，慢一点；实在不行看「大小」判断 |
 | aria2 报 403 | 同上，设置页没填代理，或者代理节点换了（换节点要重新播放拿新链接） |
+| 文件早删了，任务还显示「已完成」 | 查文件是助手干的：助手没开、还是 1.0.0 就查不了。重启助手到 1.1.0；aria2 任务和助手任务都会查 |
+| 批量页「扫描本页」认不出条目 | 这一页不是列表页，或列表还没加载完。先滚到底等缩略图出来再扫 |
+| 批量里全是「源已失效」 | 托管端把文件删了，不是解析出错。老列表常见，换一页或换条目 |
+| 「读不到这个页面的内容」 | 当前标签页不允许注入（`chrome://`、扩展商店、PDF 预览页）。换回普通网页 |
+| 解析出来但下载 0 字节 | 直链活不过几小时，隔久了要回批量页重新解析；别拿旧链接硬续 |
+| 下载很慢 / 卡在 0% | 有些 CDN 按 IP 限速或限连接数，把设置里的连接数降到 4~8 再试 |
+| 助手任务一直 0%，只显示「aria2/curl」 | 两种：① aria2 把数据缓存在内存、下完才落盘，1.1.0 之前的助手按文件大小算进度所以永远 0%；② 你看到的是**排队中**的任务。重启助手到 1.1.0，排队的现在会写明「排队中」 |
+| 失败任务只显示「请参阅日志文件」 | 那是 aria2 的页脚，不是错误。1.1.0 起会从日志里挖出 `errorCode` 并给中文提示（13 重名/残留、22 多半 403） |
+| 三个任务同名、两个报错，成功那个文件还不见了 | 名字取自网页标题，重名会撞 `errorCode=13`，后到的可能把先下好的覆盖掉。1.1.0 起自动改成 `名字 (1).mp4`，不再互相抢 |
 
 ---
 

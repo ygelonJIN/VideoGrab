@@ -35,7 +35,8 @@
     "tabs",
     "contextMenus",
     "clipboardWrite",
-    "notifications"
+    "notifications",
+    "scripting"
   ],
   "host_permissions": ["<all_urls>"],
   "commands": {

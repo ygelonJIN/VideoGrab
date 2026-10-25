@@ -17,6 +17,30 @@ const settingsReady = chrome.storage.local.get('settings').then((got) => {
 }).catch(() => {});
 
 const keyOf = (tabId) => `tab:${tabId}`;
+const BATCH_KEY = 'batchHistory';
+
+/**
+ * 注入到页面里跑：把 DOM 里的链接全收上来。
+ * 列表页往往是懒加载/JS 渲染的，后台直接抓 HTML 是空的，所以必须借页面自己的 DOM。
+ * 注意：这个函数会被序列化后注入，不能引用外部变量。
+ */
+function collectPageLinks() {
+  const out = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    const raw = a.getAttribute('href');
+    if (!raw || /^(?:#|javascript:|mailto:|tel:)/i.test(String(raw).trim())) continue;
+    try {
+      const u = new URL(raw, location.href);
+      if (u.protocol === 'http:' || u.protocol === 'https:') out.push(u.href);
+    } catch { /* 畸形链接跳过 */ }
+  }
+  return [...new Set(out)];
+}
+
+function safeName(s, fallback) {
+  const t = String(s || '').replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80);
+  return t || fallback;
+}
 
 // ---------------------------------------------------------------- 设置
 async function getSettings() {
@@ -292,6 +316,93 @@ async function handle(msg) {
       const s = await getSettings();
       return { text: aria2InputText(msg.items, s) };
     }
+
+    // ------------------------------------------------------ 批量抓取
+    // 页面里到底有哪些条目，只有跑过 JS 的 DOM 知道（列表常常是懒加载的），
+    // 所以这一步必须注入脚本读 DOM，不能靠后台直接抓 HTML。
+    case 'batch:scan': {
+      const s = await getSettings();
+      let links = [];
+      try {
+        const probe = await chrome.scripting.executeScript({
+          target: { tabId: msg.tabId },
+          func: collectPageLinks
+        });
+        links = Array.isArray(probe?.[0]?.result) ? probe[0].result : [];
+      } catch (e) {
+        throw new Error('读不到这个页面的内容：' + (e?.message || e));
+      }
+      const scan = await helperCall(s, '/api/scan', {
+        method: 'POST',
+        body: JSON.stringify({
+          url: msg.pageUrl || '',
+          links,
+          headers: { ua: s.userAgent },
+          proxy: await resolveProxy()
+        })
+      }, 60000);
+      return { scan, linkCount: links.length };
+    }
+    case 'batch:resolve': {
+      const s = await getSettings();
+      const proxy = await resolveProxy();
+      const urls = (msg.urls || []).filter(Boolean).slice(0, 60);
+      const items = [];
+      // 10 条一批，批间停一下，别把对方站打疼
+      for (let i = 0; i < urls.length; i += 10) {
+        const chunk = urls.slice(i, i + 10);
+        const r = await helperCall(s, '/api/resolve', {
+          method: 'POST',
+          body: JSON.stringify({ urls: chunk, headers: { ua: s.userAgent }, proxy })
+        }, 150000);
+        items.push(...(r.items || []));
+        if (i + 10 < urls.length) await new Promise((ok) => setTimeout(ok, 800));
+      }
+      return { items };
+    }
+    case 'batch:submit': {
+      const s = await getSettings();
+      const proxy = await resolveProxy();
+      const got = await chrome.storage.local.get(BATCH_KEY);
+      const history = { ...(got[BATCH_KEY] || {}) };
+      const jobs = [];
+      const errors = [];
+      for (const it of msg.items || []) {
+        const m = it.media;
+        if (!m?.url) { errors.push(`${it.url}: 没有可下地址`); continue; }
+        try {
+          const job = await helperCall(s, '/api/jobs', {
+            method: 'POST',
+            body: JSON.stringify({
+              type: 'mp4',
+              url: m.url,
+              name: safeName(it.name || it.title, fileNameFromUrl(m.url, 'MP4')),
+              // 这里直接用探测时验证过的那套头：该带 Referer 的带，该不带的不带
+              headers: m.headers || { ua: s.userAgent },
+              outDir: s.outputDir || '',
+              proxy
+            })
+          }, 15000);
+          jobs.push(job);
+          history[it.url] = { name: job.name, jobId: job.id, ts: Date.now() };
+        } catch (e) {
+          errors.push(`${it.url}: ${e.message}`);
+        }
+      }
+      if (jobs.length) await chrome.storage.local.set({ [BATCH_KEY]: history });
+      return { jobs, errors, history };
+    }
+    case 'batch:history': {
+      const got = await chrome.storage.local.get(BATCH_KEY);
+      return { history: got[BATCH_KEY] || {} };
+    }
+    case 'batch:forget': {
+      const got = await chrome.storage.local.get(BATCH_KEY);
+      const history = { ...(got[BATCH_KEY] || {}) };
+      for (const u of msg.urls || []) delete history[u];
+      await chrome.storage.local.set({ [BATCH_KEY]: history });
+      return { history };
+    }
     case 'probe': {
       const s = await getSettings();
       const r = await helperCall(s, '/api/probe', {
@@ -348,6 +459,29 @@ async function handle(msg) {
           list.push({ ...job, status: 'removed', completedLength: 0, totalLength: 0, downloadSpeed: 0 });
         }
       }
+
+      // aria2 只知道"下完了"，不知道文件后来还在不在 —— 问一下助手
+      const donePaths = list
+        .filter((j) => j.status === 'complete')
+        .map((j) => j.files?.[0]?.path)
+        .filter(Boolean);
+      if (donePaths.length) {
+        try {
+          const r = await helperCall(s, '/api/files/exists', {
+            method: 'POST',
+            body: JSON.stringify({ paths: donePaths })
+          }, 5000);
+          if (r?.exists) {
+            for (const j of list) {
+              const fp = j.files?.[0]?.path;
+              if (fp && Object.prototype.hasOwnProperty.call(r.exists, fp) && r.exists[fp] !== null) {
+                j.exists = r.exists[fp];
+              }
+            }
+          }
+        } catch { /* 助手不在/太旧：查不了就保持未知，别乱标 */ }
+      }
+
       return { list, dead };
     }
     case 'aria2:op': {
@@ -366,6 +500,15 @@ async function handle(msg) {
       }, 10000);
       if (r && r.ok === false) throw new Error(r.error || '删除失败');
       return { removed: !!r?.removed };
+    }
+    case 'file:reveal': {
+      const s = await getSettings();
+      const r = await helperCall(s, '/api/file/reveal', {
+        method: 'POST',
+        body: JSON.stringify({ path: msg.path })
+      }, 8000);
+      if (r && r.ok === false) throw new Error(r.error || '打开失败');
+      return { opened: true };
     }
     case 'job:forget': {
       const s = await getSettings();

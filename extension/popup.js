@@ -23,7 +23,10 @@ const state = {
   pane: 'sniff',
   aria2Ok: null,
   helperOk: null,
-  lastSig: ''
+  lastSig: '',
+  batchItems: [],
+  batchSelected: new Set(),
+  batchGroups: []
 };
 
 async function send(type, payload = {}) {
@@ -45,6 +48,7 @@ async function init() {
     return;
   }
   await refreshList(true);
+  await restoreBatchState();
   probeBackends();
   setInterval(tick, 1000);
 }
@@ -343,10 +347,33 @@ async function actFfmpeg(item) {
 }
 
 // ------------------------------------------------------------------ 任务
+// 存到哪儿必须写出来：助手默认落在 ~/Desktop，文件名又是网页标题，
+// 不显示全路径的话，用户根本找不到自己刚下的东西。
+function shortPath(p) {
+  return String(p || '').replace(/^\/Users\/[^/]+/, '~');
+}
+
+function pathLine(p) {
+  if (!p) return '';
+  return `<div class="j-path" title="${esc(p)}">${esc(shortPath(p))}</div>`;
+}
+
+function pathOps(p) {
+  if (!p) return '';
+  return `<button class="mini" data-reveal="${esc(p)}">打开文件夹</button>
+          <button class="mini" data-copypath="${esc(p)}">复制路径</button>`;
+}
+
+async function revealFile(p) {
+  const r = await send('file:reveal', { path: p });
+  if (!r?.ok) toast(r?.error || '打不开这个位置', true);
+}
+
 async function refreshJobs() {
   const got = await chrome.storage.local.get('jobs');
   const aria2Jobs = (got.jobs || []).filter((j) => j.gid);
   const parts = [];
+  let queuedN = 0;
 
   if (aria2Jobs.length) {
     const r = await send('aria2:status', { jobs: aria2Jobs });
@@ -364,7 +391,10 @@ async function refreshJobs() {
     const h = await send('helper:jobs');
     if (h?.ok) {
       state.helperOk = true;
-      for (const j of (h.data.jobs || [])) parts.push(helperJobEl(j));
+      for (const j of (h.data.jobs || [])) {
+        if (j.status === 'queued') queuedN++;
+        parts.push(helperJobEl(j));
+      }
     }
   } catch { state.helperOk = false; }
 
@@ -373,7 +403,9 @@ async function refreshJobs() {
   for (const el of parts) list.appendChild(el);
   $('#jobEmpty').hidden = parts.length > 0;
   const running = parts.filter((el) => el.classList.contains('running')).length;
-  $('#jobStat').textContent = parts.length ? `共 ${parts.length} 个，进行中 ${running}` : '';
+  $('#jobStat').textContent = parts.length
+    ? `共 ${parts.length} 个，进行中 ${running - queuedN}${queuedN ? `，排队 ${queuedN}` : ''}`
+    : '';
 }
 
 function pct(job) {
@@ -394,7 +426,9 @@ function aria2JobEl(j) {
   const status = j.status || 'unknown';
   const running = ['active', 'waiting', 'paused'].includes(status);
   const done = status === 'complete';
-  el.className = `job ${running ? 'running' : ''} ${done ? 'done' : ''} ${status === 'error' ? 'err' : ''}`;
+  // aria2 说"下完了"，但文件可能早被手动删了 —— 别再挂个"已完成"骗人
+  const missing = done && j.exists === false;
+  el.className = `job ${running ? 'running' : ''} ${done && !missing ? 'done' : ''} ${missing ? 'warn' : ''} ${status === 'error' ? 'err' : ''}`;
 
   const p = done ? 100 : pct(j);
   const speed = Number(j.downloadSpeed) || 0;
@@ -406,7 +440,7 @@ function aria2JobEl(j) {
   if (j.totalLength) meta.push(`${humanBytes(j.completedLength)} / ${humanBytes(j.totalLength)}`);
   if (speed > 0) meta.push(humanBytes(speed) + '/s');
   if (conns > 0) meta.push(`${conns} 线程`);
-  meta.push(statusText(status));
+  meta.push(missing ? '文件已删除' : statusText(status));
 
   let ops = '';
   if (status === 'active' || status === 'waiting') {
@@ -416,7 +450,8 @@ function aria2JobEl(j) {
     ops = `<button class="mini" data-job="${esc(j.gid)}" data-op="unpause">继续</button>
            <button class="mini" data-job="${esc(j.gid)}" data-op="remove">取消</button>`;
   } else {
-    ops = `${filePath ? `<button class="mini danger" data-del="${esc(filePath)}" data-gid="${esc(j.gid)}" data-name="${esc(name)}">删除文件</button>` : ''}
+    ops = `${pathOps(filePath)}
+           ${filePath ? `<button class="mini danger" data-del="${esc(filePath)}" data-gid="${esc(j.gid)}" data-name="${esc(name)}">删除文件</button>` : ''}
            <button class="mini" data-forget="${esc(j.gid)}">删除记录</button>`;
   }
 
@@ -426,8 +461,10 @@ function aria2JobEl(j) {
       <span class="j-name" title="${esc(name)}">${esc(name)}</span>
       ${ops}
     </div>
-    <div class="bar ${done ? 'done' : ''}"><i style="width:${p.toFixed(1)}%"></i></div>
+    <div class="bar ${done && !missing ? 'done' : ''}"><i style="width:${p.toFixed(1)}%"></i></div>
     <div class="j-meta">${meta.map(esc).join('<i>·</i>')}</div>
+    ${pathLine(filePath)}
+    ${missing ? '<div class="j-err">本地文件已经不在了。点「删除记录」把它从列表里去掉。</div>' : ''}
     ${j.errorMessage ? `<div class="j-err">${esc(j.errorMessage)}</div>` : ''}`;
   return el;
 }
@@ -436,18 +473,23 @@ function helperJobEl(j) {
   const el = document.createElement('li');
   const running = j.status === 'running' || j.status === 'queued';
   const done = j.status === 'done';
-  el.className = `job ${running ? 'running' : ''} ${done ? 'done' : ''} ${j.status === 'error' ? 'err' : ''}`;
+  // 完成了但文件不在本地 —— 多半是自己删了，别再糊一个"已完成"
+  const missing = done && j.exists === false;
+  el.className = `job ${running ? 'running' : ''} ${done && !missing ? 'done' : ''} ${missing ? 'warn' : ''} ${j.status === 'error' ? 'err' : ''}`;
 
   const p = done ? 100 : Math.max(0, Math.min(100, Number(j.progress) || 0));
   const meta = [];
-  if (done) meta.push('已完成');
+  if (missing) meta.push('文件已删除');
+  else if (done) meta.push('已完成');
+  else if (j.status === 'queued') meta.push('排队中');
   if (j.speed) meta.push(humanBytes(j.speed) + '/s');
   if (j.status === 'running') meta.push(p.toFixed(0) + '%');
   meta.push(j.type === 'hls' ? 'ffmpeg 合并' : 'aria2/curl');
 
   const ops = running
     ? `<button class="mini" data-hjob="${esc(j.id)}" data-op="cancel">取消</button>`
-    : `<button class="mini danger" data-hdel="${esc(j.out || '')}" data-hid="${esc(j.id)}" data-name="${esc(j.name || '')}">删除文件</button>
+    : `${pathOps(j.out)}
+       <button class="mini danger" data-hdel="${esc(j.out || '')}" data-hid="${esc(j.id)}" data-name="${esc(j.name || '')}">删除文件</button>
        <button class="mini" data-hforget="${esc(j.id)}">删除记录</button>`;
 
   el.innerHTML = `
@@ -456,16 +498,270 @@ function helperJobEl(j) {
       <span class="j-name" title="${esc(j.name || '')}">${esc(j.name || j.url)}</span>
       ${ops}
     </div>
-    <div class="bar ${done ? 'done' : ''}"><i style="width:${p.toFixed(1)}%"></i></div>
+    <div class="bar ${done && !missing ? 'done' : ''}"><i style="width:${p.toFixed(1)}%"></i></div>
     <div class="j-meta">${meta.map(esc).join('<i>·</i>')}</div>
+    ${pathLine(j.out)}
+    ${missing ? '<div class="j-err">本地文件已经不在了。直链会过期，要重下请到「批量」页重新解析。</div>' : ''}
     ${j.error ? `<div class="j-err">${esc(j.error)}</div>` : ''}`;
   return el;
+}
+
+// ------------------------------------------------------------------ 批量
+// 状态要分清楚，别把"源没了"和"解析失败"混成一个"没成功"
+const BATCH_STATUS = {
+  pending: { label: '待解析', cls: 'b-pending' },
+  ok: { label: '可下', cls: 'b-ok' },
+  gone: { label: '已下架', cls: 'b-gone' },
+  unavailable: { label: '源已失效', cls: 'b-gone' },
+  failed: { label: '解析失败', cls: 'b-fail' }
+};
+
+// 弹窗一关内存就没了，而解析一页要几十秒 —— 结果必须落到 session 里
+const BATCH_STORE = 'batchPanel';
+
+async function saveBatchState() {
+  try {
+    await chrome.storage.session.set({ [BATCH_STORE]: { items: state.batchItems, ts: Date.now() } });
+  } catch { /* 配额满了就算了，不影响当前这一屏 */ }
+}
+
+async function restoreBatchState() {
+  try {
+    const got = await chrome.storage.session.get(BATCH_STORE);
+    const saved = got[BATCH_STORE];
+    if (saved?.items?.length) state.batchItems = saved.items;
+  } catch { /* ignore */ }
+  if (!state.batchItems.length) return;
+  await loadBatchLocal();
+  renderBatch();
+}
+
+function labelOf(it) {
+  if (it.title) return it.title;
+  if (it.label) return it.label;
+  try {
+    const u = new URL(it.url);
+    return decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || u.host);
+  } catch { return it.url; }
+}
+
+async function loadBatchLocal() {
+  const [h, jobs] = await Promise.all([send('batch:history'), send('helper:jobs')]);
+  const hist = h?.ok ? (h.history || {}) : {};
+  const byName = new Map();
+  if (jobs?.ok) for (const j of (jobs.data?.jobs || [])) byName.set(j.name, j);
+
+  for (const it of state.batchItems) {
+    it.local = '';
+    it.job = null;
+    const rec = hist[it.url];
+    if (!rec) continue;
+    const j = byName.get(rec.name);
+    if (!j) { it.local = 'saved'; continue; }
+    it.job = j;
+    if (j.status === 'done') it.local = j.exists === false ? 'deleted' : 'saved';
+    else if (j.status === 'running' || j.status === 'queued') it.local = 'running';
+    else it.local = 'saved';
+  }
+}
+
+async function scanPage() {
+  if (!state.tabId) return toast('读不到当前标签页', true);
+  const btn = $('#btnScan');
+  btn.disabled = true;
+  $('#batchHint').textContent = '正在读取页面…';
+  try {
+    let pageUrl = '';
+    try { pageUrl = (await chrome.tabs.get(state.tabId))?.url || ''; } catch {}
+    const r = await send('batch:scan', { tabId: state.tabId, pageUrl });
+    if (!r?.ok) {
+      $('#batchHint').textContent = '';
+      toast(r?.error || '扫描失败', true);
+      return;
+    }
+
+    const groups = (r.scan?.listing || []).filter((g) => g.items?.length);
+    state.batchGroups = groups;
+    if (!groups.length) {
+      state.batchItems = [];
+      renderBatch();
+      $('#batchHint').textContent = '';
+      toast('这一页没认出条目列表：换个列表页，或先在页面里滚到底再扫', true);
+      return;
+    }
+
+    // 条目最多的那个模板就是列表本体
+    const best = groups[0];
+    state.batchItems = best.items.map((it) => ({
+      url: it.url, label: it.label || '', title: '', status: 'pending', media: null, reason: ''
+    }));
+    state.batchSelected = new Set();
+    $('#batchHint').textContent = `认出 ${best.count} 条（路径模板 ${best.template}），开始解析…`;
+    await loadBatchLocal();
+    renderBatch();
+    await saveBatchState();
+  } catch (e) {
+    $('#batchHint').textContent = '';
+    toast(e?.message || '扫描失败', true);
+  } finally {
+    btn.disabled = false;
+  }
+
+  // 扫描完直接解析：否则用户会看到一屏灰勾选框，根本不知道下一步该点什么
+  if (state.batchItems.some((i) => i.status === 'pending')) resolveBatch();
+}
+
+let resolving = false;
+
+async function resolveBatch() {
+  if (resolving) return;
+  const pending = state.batchItems.filter((i) => i.status === 'pending');
+  if (!pending.length) return toast('没有待解析的条目');
+
+  resolving = true;
+  const btnResolve = $('#btnResolve');
+  const btnScan = $('#btnScan');
+  btnResolve.disabled = true;
+  btnScan.disabled = true;
+
+  try {
+    // 5 条一批：能边解析边出结果，弹窗中途关了也只丢最后一批
+    const CHUNK = 5;
+    for (let i = 0; i < pending.length; i += CHUNK) {
+      const chunk = pending.slice(i, i + CHUNK);
+      $('#batchHint').textContent =
+        `解析中 ${i + 1}~${Math.min(i + CHUNK, pending.length)} / ${pending.length} …`;
+
+      const r = await send('batch:resolve', { urls: chunk.map((x) => x.url) });
+      if (!r?.ok) { toast(r?.error || '解析失败', true); break; }
+
+      const byUrl = new Map((r.items || []).map((x) => [x.url, x]));
+      for (const it of chunk) {
+        const got = byUrl.get(it.url);
+        if (!got) { it.status = 'failed'; it.reason = '没有返回结果'; continue; }
+        it.media = got.media || null;
+        it.title = got.title || '';
+        it.reason = got.reason || '';
+        it.status = got.ok ? 'ok' : got.gone ? 'gone' : got.unavailable ? 'unavailable' : 'failed';
+        if (got.ok) state.batchSelected.add(it.url);
+      }
+      renderBatch();
+      await saveBatchState();
+    }
+  } catch (e) {
+    $('#batchHint').textContent = '';
+    toast(e?.message || '解析失败', true);
+  } finally {
+    resolving = false;
+    btnResolve.disabled = false;
+    btnScan.disabled = false;
+    const n = (s) => state.batchItems.filter((i) => i.status === s).length;
+    if (state.batchItems.length) {
+      $('#batchHint').textContent =
+        `可下 ${n('ok')} · 源失效 ${n('unavailable')} · 已下架 ${n('gone')} · 失败 ${n('failed')}`;
+    }
+    renderBatch();
+  }
+}
+
+async function submitBatch() {
+  const items = state.batchItems.filter((i) => i.status === 'ok' && state.batchSelected.has(i.url));
+  if (!items.length) return toast('没有勾选「可下」的条目');
+  const btn = $('#btnBatchDown');
+  btn.disabled = true;
+  try {
+    const r = await send('batch:submit', {
+      items: items.map((i) => ({ url: i.url, name: i.title || i.label, media: i.media }))
+    });
+    if (!r?.ok) { toast(r?.error || '提交失败', true); return; }
+    const okN = (r.jobs || []).length;
+    toast(`已加入 ${okN} 个下载任务${r.errors?.length ? `，${r.errors.length} 个失败` : ''}`, !okN);
+    await loadBatchLocal();
+    renderBatch();
+    await saveBatchState();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderBatch() {
+  const list = $('#batchList');
+  list.innerHTML = '';
+  const rows = state.batchItems;
+  $('#batchEmpty').hidden = rows.length > 0;
+
+  const okAll = rows.filter((i) => i.status === 'ok').length;
+  $('#btnBatchDown').disabled = okAll === 0;
+  // 没有「可下」的时候，全选框要自己说明不能点，否则就是个死控件
+  const selAll = $('#batchSelAll');
+  selAll.disabled = okAll === 0;
+  selAll.title = okAll === 0 ? (rows.length ? '这一页没有可下的条目' : '先扫描本页') : '全选可下的条目';
+  $('#btnResolve').disabled = resolving || !rows.some((i) => i.status === 'pending');
+
+  for (const it of rows) {
+    const st = BATCH_STATUS[it.status] || BATCH_STATUS.pending;
+    const chips = [`<span class="chip ${st.cls}">${st.label}</span>`];
+    if (it.local === 'saved') chips.push('<span class="chip b-saved">已下载</span>');
+    if (it.local === 'deleted') chips.push('<span class="chip b-warn">文件已删</span>');
+    if (it.local === 'running') chips.push('<span class="chip b-pending">下载中</span>');
+    const size = it.media?.size ? humanBytes(it.media.size) : '';
+
+    const pickable = it.status === 'ok';
+    const why = pickable ? '' :
+      it.status === 'pending' ? 'title="解析完才能勾选"' : 'title="这条没有可下地址"';
+
+    const li = document.createElement('li');
+    li.className = 'row batch';
+    li.dataset.url = it.url;
+    li.innerHTML = `
+      <input type="checkbox" class="bsel" ${state.batchSelected.has(it.url) ? 'checked' : ''}
+        ${pickable ? '' : 'disabled'} ${why}>
+      <div class="main">
+        <div class="title"><span class="name" title="${esc(labelOf(it))}">${esc(labelOf(it))}</span></div>
+        <div class="sub">
+          <span class="meta">${chips.join('')}${size ? `<i>·</i>${esc(size)}` : ''}</span>
+          ${it.reason && it.status !== 'ok' ? `<span class="why" title="${esc(it.reason)}">${esc(it.reason)}</span>` : ''}
+        </div>
+      </div>`;
+    list.appendChild(li);
+  }
+
+  const picked = state.batchSelected.size;
+  $('#batchSelInfo').textContent = rows.length
+    ? `${picked ? '已勾 ' + picked : '共可下 ' + okAll} 条`
+    : '';
+  selAll.checked = okAll > 0 && picked === okAll;
 }
 
 // ------------------------------------------------------------------ 事件
 function bindEvents() {
   $('#tabSniff').addEventListener('click', () => switchPane('sniff'));
   $('#tabJobs').addEventListener('click', () => switchPane('jobs'));
+  $('#tabBatch').addEventListener('click', () => switchPane('batch'));
+  $('#btnScan').addEventListener('click', scanPage);
+  $('#btnResolve').addEventListener('click', resolveBatch);
+  $('#btnBatchDown').addEventListener('click', submitBatch);
+  $('#btnBatchRefresh').addEventListener('click', async () => {
+    await loadBatchLocal();
+    renderBatch();
+    toast('状态已刷新');
+  });
+  $('#batchSelAll').addEventListener('change', (e) => {
+    if (e.target.checked) {
+      for (const i of state.batchItems) if (i.status === 'ok') state.batchSelected.add(i.url);
+    } else {
+      state.batchSelected.clear();
+    }
+    renderBatch();
+  });
+  $('#batchList').addEventListener('click', (e) => {
+    if (!e.target.classList.contains('bsel')) return;
+    const row = e.target.closest('li.row');
+    if (!row) return;
+    if (e.target.checked) state.batchSelected.add(row.dataset.url);
+    else state.batchSelected.delete(row.dataset.url);
+    renderBatch();
+  });
   $('#btnOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
   $('#btnRefresh').addEventListener('click', () => refreshList(true));
   $('#btnJobRefresh').addEventListener('click', () => refreshJobs());
@@ -618,6 +914,8 @@ async function onJobClick(e) {
   const b = e.target.closest('button');
   if (!b) return;
 
+  if (b.dataset.reveal) return revealFile(b.dataset.reveal);
+  if (b.dataset.copypath) return actCopy(b.dataset.copypath, '路径');
   if (b.dataset.del) return deleteAria2File(b.dataset.gid, b.dataset.del, b.dataset.name);
   if (b.dataset.forget) return forgetAria2(b.dataset.forget);
   if (b.dataset.hdel) return deleteHelperFile(b.dataset.hid, b.dataset.hdel, b.dataset.name);
@@ -651,10 +949,13 @@ function switchPane(pane) {
   state.pane = pane;
   $('#paneSniff').hidden = pane !== 'sniff';
   $('#paneJobs').hidden = pane !== 'jobs';
+  $('#paneBatch').hidden = pane !== 'batch';
   $('#bar').style.display = pane === 'sniff' ? '' : 'none';
   $('#tabSniff').classList.toggle('active', pane === 'sniff');
   $('#tabJobs').classList.toggle('active', pane === 'jobs');
+  $('#tabBatch').classList.toggle('active', pane === 'batch');
   if (pane === 'jobs') refreshJobs();
+  if (pane === 'batch' && state.batchItems.length) { loadBatchLocal().then(renderBatch); }
 }
 
 function openHelperSheet() {

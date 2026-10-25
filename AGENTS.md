@@ -17,16 +17,16 @@ Chrome MV3 扩展 + 本地 Node 助手。嗅探页面媒体（MP4 / M3U8 / DASH 
 
 ## 目录
 
-- `extension/` — Chrome 扩展：`background.js` 嗅探与调度，`popup.*` 面板，`options.*` 设置
-- `helper/` — 本地助手：`server.mjs`、`start.sh`、launchd plist
-- `tools/` — `selftest.mjs`（逻辑）、`popup-test.mjs`（渲染）、`cdp-test.mjs`（真浏览器，备用）
+- `extension/` — Chrome 扩展：`background.js` 嗅探与调度，`popup.*` 面板（嗅探 / 任务 / 批量），`options.*` 设置
+- `helper/` — 本地助手：`server.mjs`、`extract.mjs`（通用媒体发现器，纯函数）、`start.sh`、launchd plist
+- `tools/` — `extract-test.mjs`（发现器，合成 HTML）、`selftest.mjs`（逻辑）、`popup-test.mjs`（渲染）、`cdp-test.mjs`（真浏览器，备用）
 - `不推送/` — 私人文件，永不提交
 
 ## 经验索引
 
 - `经验文档/使用说明.md`
   - 什么时候读：改嗅探/下载逻辑、改助手接口、加新下载器、Chrome 升级后扩展失效
-  - 包含：架构与数据流、请求头怎么来、aria2 与助手的参数约定、测试怎么跑、踩过的坑
+  - 包含：架构与数据流、请求头怎么来、批量抓取的通用发现器、aria2 与助手的参数约定、测试怎么跑、踩过的坑
   - 不用读：只改样式、图标、文案
 
 ## 禁止
