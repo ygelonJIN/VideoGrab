@@ -137,31 +137,7 @@ function watchOutput(job) {
 }
 
 
-// ---------------------------------------------------------------- 预览探针
-const probeCache = new Map();      // key -> {at, data}
-const PROBE_TTL = 10 * 60 * 1000;
-let probing = 0;
-
-// HLS 专有的参数不能喂给 MP4，否则 ffmpeg 会报 "Option not found"
-const HLS_OPTS = ['-allowed_extensions', 'ALL', '-allowed_segment_extensions', 'ALL', '-extension_picky', '0'];
-
-function whitelist(proxy) {
-  // 走代理时 ffmpeg 用 httpproxy 这个独立协议，不在白名单里会报 Invalid argument
-  return 'file,http,https,tcp,tls,crypto' + (proxy ? ',httpproxy' : '');
-}
-
-function inputOpts(headers = {}, hls = false, proxy = '') {
-  const args = [];
-  const hdr = headerEntries(headers).filter(([k]) => k !== 'User-Agent')
-    .map(([k, v]) => `${k}: ${v}`).join('\r\n');
-  if (hdr) args.push('-headers', hdr + '\r\n');
-  if (headers.ua) args.push('-user_agent', headers.ua);
-  args.push('-protocol_whitelist', whitelist(proxy));
-  if (hls) args.push(...HLS_OPTS);
-  args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
-  return args;
-}
-
+// ---------------------------------------------------------------- 进程与参数工具
 function proxyEnv(proxy) {
   if (!proxy) return process.env;
   return {
@@ -179,19 +155,33 @@ function runCapture(bin, args, timeoutMs = 25000, proxy = '') {
     let err = '';
     const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, timeoutMs);
     child.stdout.on('data', (d) => chunks.push(d));
-    child.stderr.on('data', (d) => { err = (err + d).slice(-1200); });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code, out: Buffer.concat(chunks), err });
-    });
+    child.stderr.on('data', (d) => { err = (err + d).slice(-2000); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out: Buffer.concat(chunks), err }); });
     child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out: Buffer.alloc(0), err: e.message }); });
   });
 }
 
 const lastLine = (s) => String(s || '').split('\n').map((x) => x.trim()).filter(Boolean).slice(-1)[0] || '';
 
+function whitelist(proxy) {
+  // 走代理时 ffmpeg 用 httpproxy 这个独立协议，不在白名单里会报 Invalid argument
+  return 'file,http,https,tcp,tls,crypto' + (proxy ? ',httpproxy' : '');
+}
+
+function inputOpts(headers = {}, hls = false, proxy = '') {
+  const args = [];
+  const hdr = headerEntries(headers).filter(([k]) => k !== 'User-Agent')
+    .map(([k, v]) => `${k}: ${v}`).join('\r\n');
+  if (hdr) args.push('-headers', hdr + '\r\n');
+  if (headers.ua) args.push('-user_agent', headers.ua);
+  args.push('-protocol_whitelist', whitelist(proxy));
+  if (hls) args.push('-allowed_extensions', 'ALL', '-allowed_segment_extensions', 'ALL', '-extension_picky', '0');
+  args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
+  return args;
+}
+
 function parseMeta(raw) {
-  const meta = { duration: 0, width: 0, height: 0, bitrate: 0, videoCodec: '', audioCodec: '', thumbnail: '' };
+  const meta = { duration: 0, width: 0, height: 0, bitrate: 0, videoCodec: '', audioCodec: '' };
   try {
     const j = JSON.parse(raw.toString('utf8'));
     const v = (j.streams || []).find((s) => s.codec_type === 'video');
@@ -206,88 +196,147 @@ function parseMeta(raw) {
   return meta;
 }
 
-async function grabFrame(url, opts, at, proxy) {
-  const head = ['-v', 'error', '-nostdin', ...opts];
-  const tail = ['-frames:v', '1', '-vf', 'scale=480:-2', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'];
-  // 先试输入端快进，再试从头抓（有的源不支持 seek）
-  const variants = [
-    [...head, '-ss', String(at), '-i', url, ...tail],
-    [...head, '-i', url, ...tail]
-  ];
-  for (const args of variants) {
-    const r = await runCapture('ffmpeg', args, 75000, proxy);
-    if (r.code === 0 && r.out.length > 500) {
-      return { dataUrl: 'data:image/jpeg;base64,' + r.out.toString('base64'), at };
+// ---------------------------------------------------------------- 元信息（读文件头，不走 ffmpeg）
+const metaCache = new Map();      // key -> {at, data}
+const META_TTL = 10 * 60 * 1000;
+
+// 用 curl 取一段字节：能带 Referer/Cookie，也能走代理
+const HDR_SENTINEL = '__VG_HDR__';
+
+async function curlRange(url, headers, proxy, start, end, timeoutMs = 20000) {
+  const args = ['-sS', '-f', '--max-time', String(Math.round(timeoutMs / 1000)), '-r', `${start}-${end}`];
+  if (proxy) args.push('-x', proxy);
+  for (const [k, v] of headerEntries(headers)) args.push('-H', `${k}: ${v}`);
+  args.push('-w', HDR_SENTINEL + '%{header_json}');
+  args.push(url);
+  const res = await runCapture(CURL || 'curl', args, timeoutMs + 2000);
+  const raw = res.out;
+  const idx = raw.lastIndexOf(HDR_SENTINEL);
+  let body = raw;
+  let hdrs = {};
+  if (idx > 0) {
+    body = raw.subarray(0, idx);
+    try { hdrs = JSON.parse(raw.subarray(idx + HDR_SENTINEL.length).toString('utf8')); } catch {}
+  }
+  return { code: res.code, out: body, err: res.err, headers: hdrs };
+}
+
+function boxWalk(buf, start, end, visit, depth = 0) {
+  let off = start;
+  let guard = 0;
+  while (off + 8 <= end && guard++ < 500) {
+    let size = buf.readUInt32BE(off);
+    const type = buf.toString('latin1', off + 4, off + 8);
+    let hdr = 8;
+    if (size === 1) {                       // 64 位长度
+      if (off + 16 > end) return;
+      size = Number(buf.readBigUInt64BE(off + 8));
+      hdr = 16;
+    } else if (size === 0) {                // 一直到文件尾
+      size = end - off;
     }
+    if (size < hdr) return;
+    // box 可能比我们抓到的这段还长（moov 常常好几 MB），先按可见部分处理
+    const visibleEnd = Math.min(off + size, end);
+    visit(type, off, visibleEnd, hdr);
+    if (depth < 6 && ['moov', 'trak', 'mdia', 'minf', 'stbl'].includes(type)) {
+      boxWalk(buf, off + hdr, visibleEnd, visit, depth + 1);
+    }
+    if (off + size > end) return;
+    off += size;
   }
-  return null;
 }
 
-async function probeOnce(url, headers, hls, proxy) {
-  const opts = inputOpts(headers, hls, proxy);
-  // ffprobe 和抓帧并行跑：走代理时 ffprobe 可能要 30s+，串着等太慢
-  const DEFAULT_AT = 20;
-  const [p, early] = await Promise.all([
-    runCapture('ffprobe', [
-      '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', ...opts, '-i', url
-    ], 75000, proxy),
-    grabFrame(url, opts, DEFAULT_AT, proxy)
-  ]);
+function parseMp4Head(buf) {
+  const out = { duration: 0, width: 0, height: 0, videoCodec: '', audioCodec: '', brand: '' };
+  let found = false;
 
-  if (p.code !== 0) throw new Error(lastLine(p.err) || 'ffprobe 打不开这个地址');
-  const meta = parseMeta(p.out);
-
-  let frame = early;
-  if (!frame) {
-    const cap = hls ? 600 : DEFAULT_AT;
-    const at = meta.duration > cap ? cap : Math.max(1, Math.round(meta.duration / 3));
-    if (at !== DEFAULT_AT) frame = await grabFrame(url, opts, at, proxy);
-  }
-
-  if (frame) {
-    meta.thumbnail = frame.dataUrl;
-    meta.thumbAt = frame.at;
-  } else if (!meta.duration) {
-    throw new Error('拿不到任何信息（可能是防盗链、链接过期或代理不通）');
-  } else {
-    meta.probeError = '元信息拿到了，但抓帧失败';
-  }
-  return meta;
-}
-
-async function probeMedia(url, headers, proxy) {
-  const key = url + '|' + (headers.referer || '') + '|' + (headers.cookie || '').slice(0, 24) + '|' + (proxy || '');
-  const hit = probeCache.get(key);
-  if (hit && Date.now() - hit.at < PROBE_TTL) return hit.data;
-
-  const ffmpeg = which('ffmpeg');
-  const ffprobe = which('ffprobe');
-  if (!ffmpeg || !ffprobe) throw new Error('找不到 ffmpeg / ffprobe');
-  if (probing >= 3) throw new Error('预览任务太多，稍等一下');
-
-  const looksHls = /\.m3u8?(\?|$)/i.test(url) || /mpegurl|m3u8/i.test(url);
-  const order = looksHls ? [true, false] : [false, true];
-
-  probing++;
-  try {
-    let lastErr = null;
-    for (const hls of order) {
-      try {
-        const meta = await probeOnce(url, headers, hls, proxy);
-        probeCache.set(key, { at: Date.now(), data: meta });
-        if (probeCache.size > 60) {
-          const oldest = [...probeCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
-          if (oldest) probeCache.delete(oldest[0]);
-        }
-        return meta;
-      } catch (e) {
-        lastErr = e;
+  boxWalk(buf, 0, buf.length, (type, start, end, hdr) => {
+    const p = start + hdr;
+    if (type === 'ftyp' && !out.brand) {
+      out.brand = buf.toString('latin1', p, Math.min(p + 4, end));
+    } else if (type === 'mvhd') {
+      const ver = buf[p];
+      if (ver === 1) {
+        const timescale = buf.readUInt32BE(p + 20);
+        const duration = Number(buf.readBigUInt64BE(p + 24));
+        if (timescale) out.duration = Math.round(duration / timescale);
+      } else {
+        const timescale = buf.readUInt32BE(p + 12);
+        const duration = buf.readUInt32BE(p + 16);
+        if (timescale) out.duration = Math.round(duration / timescale);
+      }
+      found = true;
+    } else if (type === 'tkhd') {
+      const ver = buf[p];
+      const wOff = ver === 1 ? p + 88 : p + 76;
+      if (wOff + 8 <= end) {
+        const w = Math.round(buf.readUInt32BE(wOff) / 65536);
+        const h = Math.round(buf.readUInt32BE(wOff + 4) / 65536);
+        if (w > 0 && h > 0 && (!out.width || w > out.width)) { out.width = w; out.height = h; }
+      }
+    } else if (type === 'stsd') {
+      const n = buf.readUInt32BE(p + 4);
+      if (n > 0 && p + 16 <= end) {
+        const fourcc = buf.toString('latin1', p + 12, p + 16);
+        const kind = fourcc.startsWith('avc') || fourcc.startsWith('hvc') || fourcc.startsWith('hev')
+          || fourcc.startsWith('vp') || fourcc === 'av01' ? 'video' : 'audio';
+        if (kind === 'video' && !out.videoCodec) out.videoCodec = fourcc;
+        else if (kind === 'audio' && !out.audioCodec) out.audioCodec = fourcc;
       }
     }
-    throw lastErr || new Error('预览失败');
-  } finally {
-    probing--;
+  });
+
+  return found ? out : null;
+}
+
+async function probeMeta(url, headers, proxy) {
+  const key = url + '|' + (headers.referer || '') + '|' + (proxy || '');
+  const hit = metaCache.get(key);
+  if (hit && Date.now() - hit.at < META_TTL) return hit.data;
+
+  const SIZE = 262144;   // 先取 256KB，绝大多数 faststart 文件的 moov 都在里面
+  const r1 = await curlRange(url, headers, proxy, 0, SIZE - 1);
+  if (r1.code !== 0) {
+    throw new Error(lastLine(r1.err) || '读取文件头失败（403 或链接过期）');
   }
+
+  let size = r1.out.length;
+  const cr = (r1.headers?.['content-range'] || [])[0] || '';
+  const m = cr.match(/\/(\d+)\s*$/);
+  if (m) size = Number(m[1]);
+
+  let parsed = null;
+  try { parsed = parseMp4Head(r1.out); } catch { parsed = null; }
+
+  // moov 不在开头：再取尾部 512KB 找一次
+  if (!parsed && size > SIZE) {
+    const r2 = await curlRange(url, headers, proxy, Math.max(0, size - 524288), size - 1);
+    if (r2.code === 0) {
+      try { parsed = parseMp4Head(r2.out); } catch { parsed = null; }
+    }
+  }
+
+  if (!parsed) throw new Error('不是 MP4，或者索引读不出来（可以改用「复制 ffmpeg 命令」）');
+
+  const data = { ...parsed, size, source: 'mp4-head', thumbnail: '' };
+  metaCache.set(key, { at: Date.now(), data });
+  if (metaCache.size > 60) {
+    const oldest = [...metaCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) metaCache.delete(oldest[0]);
+  }
+  return data;
+}
+
+// 旧接口保留：HLS 或解析失败时才退回 ffprobe（慢，但兜底）
+async function probeWithFfprobe(url, headers, hls, proxy) {
+  const opts = inputOpts(headers, hls, proxy);
+  const p = await runCapture('ffprobe', [
+    '-v', 'error', '-probesize', '65536', '-analyzeduration', '0',
+    '-print_format', 'json', '-show_format', '-show_streams', ...opts, '-i', url
+  ], 90000, proxy);
+  if (p.code !== 0) throw new Error(lastLine(p.err) || 'ffprobe 打不开这个地址');
+  return { ...parseMeta(p.out), thumbnail: '', source: 'ffprobe' };
 }
 
 // ---------------------------------------------------------------- 参数拼装
@@ -533,11 +582,29 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/probe' && req.method === 'POST') {
       const body = await readBody(req);
       if (!body.url) return json(res, 400, { error: '缺 url' });
+      const url = body.url;
+      const headers = body.headers || {};
+      const proxy = body.proxy || '';
+      const isHls = /\.m3u8?(\?|$)/i.test(url) || body.kind === 'HLS';
+
+      // HLS 不抓帧：时长/分片由前端解析播放列表拿到，这里不联网
+      if (isHls) {
+        return json(res, 200, {
+          ok: true,
+          media: { duration: 0, width: 0, height: 0, videoCodec: '', audioCodec: '', thumbnail: '', hls: true }
+        });
+      }
+
       try {
-        const media = await probeMedia(body.url, body.headers || {}, body.proxy || '');
+        const media = await probeMeta(url, headers, proxy);
         return json(res, 200, { ok: true, media });
       } catch (e) {
-        return json(res, 200, { ok: false, error: e?.message || String(e) });
+        try {
+          const media = await probeWithFfprobe(url, headers, false, proxy);
+          return json(res, 200, { ok: true, media });
+        } catch (e2) {
+          return json(res, 200, { ok: false, error: e2.message || e.message });
+        }
       }
     }
 

@@ -167,29 +167,19 @@ function detailEl(item) {
   const d = state.detail || {};
   const p = d.probe || null;
   const stream = item.kind === 'HLS' || item.kind === 'DASH';
-
-  let thumb;
-  if (p?.thumbnail) {
-    thumb = `<img src="${p.thumbnail}" alt="预览帧">`;
-  } else if (d.loading) {
-    thumb = '<div class="ph">抓预览帧…<br><span class="ph-sub">走代理时可能要 30~60 秒</span></div>';
-  } else if (d.err) {
-    thumb = `<div class="ph">无法预览<br><span class="ph-sub">${esc(String(d.err).slice(0, 90))}</span></div>`;
-  } else {
-    thumb = '<div class="ph">无预览</div>';
-  }
+  const hls = d.hls;
 
   const facts = [];
   if (p?.duration) facts.push('时长 ' + humanDuration(p.duration));
+  if (hls?.duration) facts.push('时长 ' + humanDuration(hls.duration));
   if (p?.width) facts.push(`${p.width}×${p.height}`);
   if (p?.videoCodec) facts.push(p.videoCodec + (p.audioCodec ? ' / ' + p.audioCodec : ''));
-  if (!stream && item.size) facts.push(humanBytes(item.size));
+  const size = p?.size || item.size;
+  if (size) facts.push(humanBytes(size));
 
-  const hls = d.hls;
   const streamFacts = [];
   if (hls?.type === 'media') {
     streamFacts.push(hls.segments + ' 个分片');
-    if (hls.duration) streamFacts.push('总长 ' + humanDuration(hls.duration));
     streamFacts.push(hls.encrypted ? 'AES 加密' : '未加密');
     streamFacts.push(hls.live ? '直播流' : '点播');
   }
@@ -200,37 +190,25 @@ function detailEl(item) {
   else acts.push(['aria2', 'aria2 下载'], ['browser', '浏览器下载']);
   acts.push(['copy', '复制链接']);
 
+  let head;
+  if (d.err) {
+    head = `<div class="facts">${facts.length ? facts.map(esc).join('<i>·</i>') : ''}</div>
+      <div class="hintline err">${esc(String(d.err).slice(0, 120))}</div>
+      <div class="hintline">${errHint(d.err)}</div>
+      <div class="acts"><button class="mini" data-act="diagcmd">复制诊断命令</button></div>`;
+  } else if (d.loading && !facts.length && !streamFacts.length) {
+    head = '<div class="facts dim">读取文件信息…</div>';
+  } else {
+    head = `<div class="facts">${facts.length ? facts.map(esc).join('<i>·</i>') : '<span class="dim">暂无元信息</span>'}</div>
+      ${streamFacts.length ? `<div class="facts soft">${streamFacts.map(esc).join('<i>·</i>')}</div>` : ''}`;
+  }
+
   li.innerHTML = `
-    <div class="preview">
-      <div class="thumb">${thumb}</div>
-      <div class="info">
-        ${facts.length ? `<div class="facts">${facts.map(esc).join('<i>·</i>')}</div>` : '<div class="facts dim">暂无元信息</div>'}
-        ${streamFacts.length ? `<div class="facts soft">${streamFacts.map(esc).join('<i>·</i>')}</div>` : ''}
-        ${d.err ? `<div class="hintline">${errHint(d.err)}</div>
-        <div class="acts" style="margin-top:6px">
-          <button class="mini" data-act="diagcmd">复制诊断命令</button>
-        </div>` : ''}
-      </div>
-    </div>
+    ${head}
     ${hls?.type === 'master' ? variantsHtml(hls) : ''}
-    <div class="acts">
-      ${acts.map(([a, label]) => `<button class="mini" data-act="${a}">${label}</button>`).join('')}
-    </div>
+    ${d.err ? '' : `<div class="acts">${acts.map(([a, label]) => `<button class="mini" data-act="${a}">${label}</button>`).join('')}</div>`}
   `;
   return li;
-}
-
-function diagCommand(item) {
-  const h = item.headers || {};
-  const q = (s) => '"' + String(s).replace(/(["\\$`])/g, '\\$1') + '"';
-  const parts = ['curl -sS -o /dev/null -D -'];
-  if (h.ua) parts.push('-A ' + q(h.ua));
-  if (h.referer) parts.push('-H ' + q('Referer: ' + h.referer));
-  if (h.origin) parts.push('-H ' + q('Origin: ' + h.origin));
-  if (h.cookie) parts.push('-H ' + q('Cookie: ' + h.cookie));
-  parts.push('-r 0-1');
-  parts.push(q(item.url));
-  return parts.join(' ');
 }
 
 function errHint(err) {
