@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "视频下载器 VideoGrab",
+  "version": "1.0.0",
+  "description": "嗅探页面里的 MP4 / M3U8 / DASH 等媒体，自动带上真实 Referer、UA、Cookie，一键交给 aria2 多线程或 ffmpeg 合并。",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "视频下载器",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": [
+    "webRequest",
+    "storage",
+    "downloads",
+    "tabs",
+    "contextMenus",
+    "clipboardWrite",
+    "notifications"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+V",
+        "mac": "Alt+Shift+V"
+      },
+      "description": "打开视频下载器"
+    }
+  }
+}

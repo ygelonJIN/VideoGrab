@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>视频下载器</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <img src="icons/32.png" alt="">
+      <span>视频下载器</span>
+    </div>
+    <nav class="tabs">
+      <button id="tabSniff" class="tab active" data-pane="sniff">嗅探<b id="cnt">0</b></button>
+      <button id="tabJobs" class="tab" data-pane="jobs">任务</button>
+    </nav>
+    <button id="btnOptions" class="ghost icon" title="设置">⚙</button>
+  </header>
+
+  <section id="paneSniff" class="pane">
+    <div class="toolbar">
+      <input id="q" type="search" placeholder="搜 文件名 / 域名 / 类型" autocomplete="off">
+      <select id="kind">
+        <option value="">全部</option>
+        <option value="stream">流 HLS/DASH</option>
+        <option value="file">完整文件</option>
+        <option value="audio">音频</option>
+        <option value="seg">分片</option>
+      </select>
+      <button id="btnRefresh" class="ghost icon" title="刷新">↻</button>
+      <button id="btnClear" class="ghost icon" title="清空本页记录">⌫</button>
+    </div>
+    <div id="hint" class="hint"></div>
+    <ul id="list" class="list"></ul>
+    <div id="empty" class="empty">
+      <p>还没有嗅到媒体</p>
+      <p class="sub">在播放页点一下播放，或刷新页面</p>
+    </div>
+  </section>
+
+  <section id="paneJobs" class="pane" hidden>
+    <div class="toolbar">
+      <span id="jobStat" class="hint"></span>
+      <button id="btnJobRefresh" class="ghost icon" title="刷新任务">↻</button>
+    </div>
+    <ul id="jobList" class="list"></ul>
+    <div id="jobEmpty" class="empty"><p>没有任务</p></div>
+  </section>
+
+  <footer id="bar">
+    <label class="check"><input type="checkbox" id="selAll"><span>全选</span></label>
+    <span id="selInfo" class="hint">未选择</span>
+    <button id="btnAria2" class="primary">aria2 下载</button>
+    <button id="btnTxt" class="ghost">导出 txt</button>
+  </footer>
+</div>
+<div id="toast" class="toast" hidden></div>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

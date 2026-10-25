@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>视频下载器 · 设置</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1><img src="icons/48.png" alt="">视频下载器 <span>设置</span></h1>
+    <p class="lead">嗅探到的真实 Referer / UA / Cookie 会自动带给 aria2 和 ffmpeg，不用再手动 Copy as cURL。</p>
+  </header>
+
+  <section class="card">
+    <h2>aria2（MP4 多线程下载）</h2>
+    <div class="grid">
+      <label>RPC 地址
+        <input id="aria2Rpc" placeholder="http://127.0.0.1:6800/jsonrpc">
+        <small>aria2 开着 <code>--enable-rpc</code> 时才有</small>
+      </label>
+      <label>RPC 密钥
+        <input id="aria2Secret" type="password" placeholder="没设就留空">
+      </label>
+      <label>每条连接数 <em>x</em>
+        <input id="aria2Conns" type="number" min="1" max="16" value="16">
+      </label>
+      <label>分段数 <em>s</em>
+        <input id="aria2Split" type="number" min="1" max="16" value="16">
+      </label>
+      <label>最小分片
+        <input id="aria2MinSplit" placeholder="1M">
+      </label>
+      <label>保存目录
+        <input id="aria2Dir" placeholder="留空 = aria2 默认目录，可写 ~/Downloads/VideoGrab">
+      </label>
+    </div>
+    <div class="row-actions">
+      <button id="testAria2" class="ghost">测试 aria2</button>
+      <button id="copyAria2Cmd" class="ghost">复制启动命令</button>
+      <span id="aria2State" class="state"></span>
+    </div>
+    <pre class="code" id="aria2Cmd">aria2c --enable-rpc --rpc-listen-all=false --rpc-allow-origin-all --continue=true</pre>
+  </section>
+
+  <section class="card">
+    <h2>本地助手（M3U8 → ffmpeg 合并）</h2>
+    <div class="grid">
+      <label>助手地址
+        <input id="helperUrl" placeholder="http://127.0.0.1:8765">
+      </label>
+      <label>输出目录
+        <input id="outputDir" placeholder="留空 = ~/Desktop">
+      </label>
+    </div>
+    <div class="row-actions">
+      <button id="testHelper" class="ghost">测试助手</button>
+      <button id="copyHelperCmd" class="ghost">复制启动命令</button>
+      <span id="helperState" class="state"></span>
+    </div>
+    <pre class="code" id="helperCmd">cd 视频下载器/helper &amp;&amp; ./start.sh</pre>
+  </section>
+
+  <section class="card">
+    <h2>嗅探</h2>
+    <div class="grid">
+      <label class="wide">默认 User-Agent
+        <input id="userAgent">
+        <small>请求里抓不到 UA 时才用它</small>
+      </label>
+      <label>忽略小于（KB）
+        <input id="minSizeKB" type="number" min="0" value="0">
+        <small>0 = 不过滤</small>
+      </label>
+      <label class="switch">
+        <input id="showSegments" type="checkbox">
+        <span>显示 .ts / .m4s 分片</span>
+      </label>
+      <label class="switch">
+        <input id="autoClean" type="checkbox">
+        <span>跨站跳转时自动清空记录</span>
+      </label>
+    </div>
+  </section>
+
+  <footer>
+    <button id="save" class="primary">保存</button>
+    <button id="reset" class="ghost">恢复默认</button>
+    <span id="saveState" class="state"></span>
+  </footer>
+
+  <section class="card tip">
+    <h2>用法</h2>
+    <ol>
+      <li>打开播放页，点一次播放。</li>
+      <li>点工具栏图标（或 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd>），列表里会冒出媒体。</li>
+      <li>MP4 / WebM 这类完整文件点 <b>⚡</b> 交给 aria2，多线程比浏览器快很多。</li>
+      <li>M3U8 / DASH 点 <b>解析</b>，看清清晰度和时长，再「复制 ffmpeg 命令」或「交给助手」。</li>
+      <li>要批量：勾选多条 → <b>aria2 下载</b>，或者 <b>导出 txt</b> 后用 <code>aria2c -i 文件.txt</code>。</li>
+    </ol>
+  </section>
+</main>
+<script type="module" src="options.js"></script>
+</body>
+</html>
