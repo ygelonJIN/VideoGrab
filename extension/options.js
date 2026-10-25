@@ -3,7 +3,7 @@ import { DEFAULT_SETTINGS } from './common.js';
 
 const FIELDS = [
   'aria2Rpc', 'aria2Secret', 'aria2Conns', 'aria2Split', 'aria2MinSplit', 'aria2Dir',
-  'helperUrl', 'outputDir', 'userAgent', 'minSizeKB', 'showSegments', 'autoClean'
+  'helperUrl', 'outputDir', 'userAgent', 'minSizeKB', 'showSegments', 'autoClean', 'proxy'
 ];
 
 const $ = (id) => document.getElementById(id);

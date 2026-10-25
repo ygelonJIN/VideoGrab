@@ -70,6 +70,9 @@ const opt = C.aria2Options(s, item, 'x.mp4');
 check('aria2 选项 header', opt.header.includes('Referer: https://site.com/watch/1') && opt.header.includes('Cookie: a=b'));
 check('aria2 选项 并发', opt['max-connection-per-server'] === '16' && opt.split === '16');
 check('aria2 选项 out', opt.out === 'x.mp4');
+const optProxy = C.aria2Options({ ...s, proxy: 'http://127.0.0.1:7897' }, item, 'x.mp4');
+check('aria2 选项带代理', optProxy['all-proxy'] === 'http://127.0.0.1:7897', JSON.stringify(optProxy['all-proxy']));
+check('代理为空时不写 all-proxy', !('all-proxy' in C.aria2Options(s, item, 'x.mp4')));
 
 const txt = C.aria2InputText([item, { ...item, url: 'https://cdn.com/v/y.mp4' }], s);
 check('aria2 -i 文本 两条', txt.split('\n\n').length === 2);

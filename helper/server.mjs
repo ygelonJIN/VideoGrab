@@ -145,22 +145,37 @@ let probing = 0;
 // HLS 专有的参数不能喂给 MP4，否则 ffmpeg 会报 "Option not found"
 const HLS_OPTS = ['-allowed_extensions', 'ALL', '-allowed_segment_extensions', 'ALL', '-extension_picky', '0'];
 
-function inputOpts(headers = {}, hls = false) {
+function whitelist(proxy) {
+  // 走代理时 ffmpeg 用 httpproxy 这个独立协议，不在白名单里会报 Invalid argument
+  return 'file,http,https,tcp,tls,crypto' + (proxy ? ',httpproxy' : '');
+}
+
+function inputOpts(headers = {}, hls = false, proxy = '') {
   const args = [];
   const hdr = headerEntries(headers).filter(([k]) => k !== 'User-Agent')
     .map(([k, v]) => `${k}: ${v}`).join('\r\n');
   if (hdr) args.push('-headers', hdr + '\r\n');
   if (headers.ua) args.push('-user_agent', headers.ua);
-  args.push('-protocol_whitelist', 'file,http,https,tcp,tls,crypto');
+  args.push('-protocol_whitelist', whitelist(proxy));
   if (hls) args.push(...HLS_OPTS);
   args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
   return args;
 }
 
-function runCapture(bin, args, timeoutMs = 25000) {
+function proxyEnv(proxy) {
+  if (!proxy) return process.env;
+  return {
+    ...process.env,
+    http_proxy: proxy, https_proxy: proxy,
+    HTTP_PROXY: proxy, HTTPS_PROXY: proxy,
+    all_proxy: proxy, ALL_PROXY: proxy
+  };
+}
+
+function runCapture(bin, args, timeoutMs = 25000, proxy = '') {
   return new Promise((resolve) => {
     const chunks = [];
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: proxyEnv(proxy) });
     let err = '';
     const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, timeoutMs);
     child.stdout.on('data', (d) => chunks.push(d));
@@ -191,7 +206,7 @@ function parseMeta(raw) {
   return meta;
 }
 
-async function grabFrame(url, opts, at) {
+async function grabFrame(url, opts, at, proxy) {
   const head = ['-v', 'error', '-nostdin', ...opts];
   const tail = ['-frames:v', '1', '-vf', 'scale=480:-2', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'];
   // 先试输入端快进，再试从头抓（有的源不支持 seek）
@@ -200,7 +215,7 @@ async function grabFrame(url, opts, at) {
     [...head, '-i', url, ...tail]
   ];
   for (const args of variants) {
-    const r = await runCapture('ffmpeg', args, 30000);
+    const r = await runCapture('ffmpeg', args, 75000, proxy);
     if (r.code === 0 && r.out.length > 500) {
       return { dataUrl: 'data:image/jpeg;base64,' + r.out.toString('base64'), at };
     }
@@ -208,28 +223,40 @@ async function grabFrame(url, opts, at) {
   return null;
 }
 
-async function probeOnce(url, headers, hls) {
-  const opts = inputOpts(headers, hls);
-  const p = await runCapture('ffprobe', [
-    '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', ...opts, '-i', url
+async function probeOnce(url, headers, hls, proxy) {
+  const opts = inputOpts(headers, hls, proxy);
+  // ffprobe 和抓帧并行跑：走代理时 ffprobe 可能要 30s+，串着等太慢
+  const DEFAULT_AT = 20;
+  const [p, early] = await Promise.all([
+    runCapture('ffprobe', [
+      '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', ...opts, '-i', url
+    ], 75000, proxy),
+    grabFrame(url, opts, DEFAULT_AT, proxy)
   ]);
+
   if (p.code !== 0) throw new Error(lastLine(p.err) || 'ffprobe 打不开这个地址');
   const meta = parseMeta(p.out);
-  // HLS 跳转便宜（按分片取），MP4 远程 seek 可能要拉很多字节，跨度压小
-  const cap = hls ? 600 : 60;
-  const at = meta.duration > cap ? cap : Math.max(1, Math.round(meta.duration / 3));
-  const frame = await grabFrame(url, opts, at);
+
+  let frame = early;
+  if (!frame) {
+    const cap = hls ? 600 : DEFAULT_AT;
+    const at = meta.duration > cap ? cap : Math.max(1, Math.round(meta.duration / 3));
+    if (at !== DEFAULT_AT) frame = await grabFrame(url, opts, at, proxy);
+  }
+
   if (frame) {
     meta.thumbnail = frame.dataUrl;
     meta.thumbAt = frame.at;
+  } else if (!meta.duration) {
+    throw new Error('拿不到任何信息（可能是防盗链、链接过期或代理不通）');
   } else {
     meta.probeError = '元信息拿到了，但抓帧失败';
   }
   return meta;
 }
 
-async function probeMedia(url, headers) {
-  const key = url + '|' + (headers.referer || '') + '|' + (headers.cookie || '').slice(0, 24);
+async function probeMedia(url, headers, proxy) {
+  const key = url + '|' + (headers.referer || '') + '|' + (headers.cookie || '').slice(0, 24) + '|' + (proxy || '');
   const hit = probeCache.get(key);
   if (hit && Date.now() - hit.at < PROBE_TTL) return hit.data;
 
@@ -246,7 +273,7 @@ async function probeMedia(url, headers) {
     let lastErr = null;
     for (const hls of order) {
       try {
-        const meta = await probeOnce(url, headers, hls);
+        const meta = await probeOnce(url, headers, hls, proxy);
         probeCache.set(key, { at: Date.now(), data: meta });
         if (probeCache.size > 60) {
           const oldest = [...probeCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
@@ -273,7 +300,7 @@ function ffmpegArgs(job) {
   if (headers.ua) args.push('-user_agent', headers.ua);
   if (type === 'hls') {
     args.push(
-      '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+      '-protocol_whitelist', whitelist(job.proxy),
       '-allowed_extensions', 'ALL',
       '-allowed_segment_extensions', 'ALL',
       '-extension_picky', '0'
@@ -296,6 +323,7 @@ function aria2Args(job, total) {
     '--dir', dir, '--out', path.basename(out)
   ];
   for (const [k, v] of headerEntries(headers)) args.push(`--header=${k}: ${v}`);
+  if (job.proxy) args.push(`--all-proxy=${job.proxy}`);
   args.push(url);
   return args;
 }
@@ -303,6 +331,7 @@ function aria2Args(job, total) {
 // ---------------------------------------------------------------- 执行
 function startJob(job) {
   job.status = 'running';
+  const proxy = job.proxy || '';
   job.startedAt = now();
   job.progress = 0;
 
@@ -322,6 +351,7 @@ function startJob(job) {
   } else if (CURL) {
     cmd = CURL;
     args = ['-f', '-L', '-C', '-', '-o', job.out];
+    if (job.proxy) args.push('-x', job.proxy);
     for (const [k, v] of headerEntries(headersOf(job))) args.push('-H', `${k}: ${v}`);
     args.push(job.url);
     tracker = (chunk) => pushLog(job, chunk);
@@ -330,7 +360,7 @@ function startJob(job) {
   }
 
   job.cmd = [cmd, ...args].join(' ');
-  const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env: proxyEnv(proxy) });
   job.child = child;
 
   const stopWatch = job.type === 'hls' ? () => {} : watchOutput(job);
@@ -414,6 +444,7 @@ function createJob(input) {
     name,
     out,
     headers: input.headers || {},
+    proxy: input.proxy || '',
     status: 'queued',
     progress: 0,
     speed: 0,
@@ -503,7 +534,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       if (!body.url) return json(res, 400, { error: '缺 url' });
       try {
-        const media = await probeMedia(body.url, body.headers || {});
+        const media = await probeMedia(body.url, body.headers || {}, body.proxy || '');
         return json(res, 200, { ok: true, media });
       } catch (e) {
         return json(res, 200, { ok: false, error: e?.message || String(e) });

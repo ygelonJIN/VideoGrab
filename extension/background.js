@@ -279,8 +279,8 @@ async function handle(msg) {
       const s = await getSettings();
       const r = await helperCall(s, '/api/probe', {
         method: 'POST',
-        body: JSON.stringify({ url: msg.item.url, headers: msg.item.headers || {} })
-      }, 45000);
+        body: JSON.stringify({ url: msg.item.url, headers: msg.item.headers || {}, proxy: s.proxy || '' })
+      }, 150000);
       if (r && r.ok === false) throw new Error(r.error || '预览失败');
       if (!r || !r.media) throw new Error('助手没有返回预览数据');
       return { media: r.media };
@@ -293,7 +293,7 @@ async function handle(msg) {
       try {
         const r = await helperCall(s, '/api/parse', {
           method: 'POST',
-          body: JSON.stringify({ url: item.url, headers: item.headers || {} })
+          body: JSON.stringify({ url: item.url, headers: item.headers || {}, proxy: s.proxy || '' })
         }, 25000);
         text = r.text;
         via = 'helper';
@@ -344,7 +344,8 @@ async function handle(msg) {
         url: msg.url,
         name: msg.name,
         headers: msg.headers || {},
-        outDir: s.outputDir || ''
+        outDir: s.outputDir || '',
+        proxy: s.proxy || ''
       };
       const r = await helperCall(s, '/api/jobs', { method: 'POST', body: JSON.stringify(body) }, 15000);
       return { job: r };

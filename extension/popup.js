@@ -172,7 +172,7 @@ function detailEl(item) {
   if (p?.thumbnail) {
     thumb = `<img src="${p.thumbnail}" alt="预览帧">`;
   } else if (d.loading) {
-    thumb = '<div class="ph">抓预览帧…</div>';
+    thumb = '<div class="ph">抓预览帧…<br><span class="ph-sub">走代理时可能要 30~60 秒</span></div>';
   } else if (d.err) {
     thumb = `<div class="ph">无法预览<br><span class="ph-sub">${esc(String(d.err).slice(0, 90))}</span></div>`;
   } else {

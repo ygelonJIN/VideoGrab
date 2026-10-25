@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS = {
   aria2Dir: '',            // 空 = 用 aria2 自己的默认目录
   helperUrl: 'http://127.0.0.1:8765',
   outputDir: '',           // 空 = 用助手默认目录（~/Desktop）
+  proxy: '',               // 如 http://127.0.0.1:7897，空 = 直连
   userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   showSegments: false,     // 是否在列表里显示 .ts / .m4s 分片
   minSizeKB: 0,            // 小于这个体积的响应忽略（0 = 不过滤）
@@ -170,6 +171,7 @@ export function aria2Options(settings, item, name) {
   };
   if (name) opt.out = name;
   if (settings.aria2Dir) opt.dir = settings.aria2Dir;
+  if (settings.proxy) opt['all-proxy'] = settings.proxy;
   return opt;
 }
 
