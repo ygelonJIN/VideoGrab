@@ -556,6 +556,28 @@ function publicJob(j) {
 }
 
 // ---------------------------------------------------------------- HTTP
+// 只允许删这几个目录里的文件，防止被网页调去删别的东西
+const DELETE_ROOTS = [
+  DEFAULT_OUT,
+  path.join(HOME, 'Downloads'),
+  path.join(HOME, 'Movies')
+].map((x) => path.resolve(x));
+
+function safeDeletePath(input) {
+  const abs = path.resolve(expandHome(input));
+  const ok = DELETE_ROOTS.some((root) => abs === root || abs.startsWith(root + path.sep));
+  if (!ok) throw new Error('只允许删除下载目录里的文件');
+  if (!/\.[a-z0-9]{2,5}$/i.test(abs)) throw new Error('不是普通文件');
+  return abs;
+}
+
+// 有 Origin 但不是扩展发来的，一律拒（浏览器会给网页带上自己的 Origin，伪造不了）
+function originAllowed(req) {
+  const o = req.headers.origin;
+  if (!o) return true;                       // curl / 本地脚本
+  return o.startsWith('chrome-extension://');
+}
+
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
@@ -587,6 +609,8 @@ const server = http.createServer(async (req, res) => {
   const p = url.pathname;
 
   try {
+    if (!originAllowed(req)) return json(res, 403, { error: 'forbidden origin' });
+
     if (p === '/api/health' && req.method === 'GET') {
       return json(res, 200, {
         ok: true, version: VERSION, home: HOME, defaultOut: DEFAULT_OUT,
@@ -653,7 +677,22 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { jobs: list, running, queued: queue.length });
     }
 
-    const m = p.match(/^\/api\/jobs\/([\w-]+)(\/cancel|\/log)?$/);
+    if (p === '/api/file/delete' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!body.path) return json(res, 400, { error: '缺 path' });
+      try {
+        const abs = safeDeletePath(body.path);
+        let removed = false;
+        for (const target of [abs, abs + '.aria2']) {
+          try { await fsp.unlink(target); removed = true; } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        }
+        return json(res, 200, { ok: true, removed, path: abs });
+      } catch (e) {
+        return json(res, 400, { error: e.message });
+      }
+    }
+
+    const m = p.match(/^\/api\/jobs\/([\w-]+)(\/cancel|\/log|\/forget)?$/);
     if (m) {
       const job = jobs.get(m[1]);
       if (!job) return json(res, 404, { error: '任务不存在' });
@@ -663,6 +702,10 @@ const server = http.createServer(async (req, res) => {
         job.endedAt = now();
         if (job.child) { try { job.child.kill('SIGTERM'); } catch {} }
         return json(res, 200, publicJob(job));
+      }
+      if (m[2] === '/forget' && req.method === 'POST') {
+        jobs.delete(m[1]);
+        return json(res, 200, { ok: true });
       }
       if (m[2] === '/log' && req.method === 'GET') {
         return json(res, 200, { log: job.logTail });

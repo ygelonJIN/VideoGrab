@@ -358,6 +358,27 @@ async function handle(msg) {
       await aria2Call(s, method, [msg.gid]);
       return {};
     }
+    case 'file:delete': {
+      const s = await getSettings();
+      const r = await helperCall(s, '/api/file/delete', {
+        method: 'POST',
+        body: JSON.stringify({ path: msg.path })
+      }, 10000);
+      if (r && r.ok === false) throw new Error(r.error || '删除失败');
+      return { removed: !!r?.removed };
+    }
+    case 'job:forget': {
+      const s = await getSettings();
+      try { await aria2Call(s, 'aria2.removeDownloadResult', [msg.gid], 4000); } catch { /* 已经不在列表里也无所谓 */ }
+      return {};
+    }
+    case 'helper:forget': {
+      const s = await getSettings();
+      try {
+        await helperCall(s, `/api/jobs/${encodeURIComponent(msg.id)}/forget`, { method: 'POST' }, 5000);
+      } catch { /* 忽略 */ }
+      return {};
+    }
     case 'helper:health':
       return { data: await helperCall(settings, '/api/health', {}, 5000) };
     case 'helper:submit': {

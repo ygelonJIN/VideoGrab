@@ -72,8 +72,8 @@ function makeChrome() {
           case 'helper:submit': return helperOnline ? { ok: true } : { ok: false, error: '助手没在运行（127.0.0.1:8765 连不上）' };
           case 'aria2:status': return {
             ok: true, dead: [], list: [
-              { gid: 'g1', name: 'movie.mp4', kind: 'MP4', status: 'active', totalLength: 1000, completedLength: 512, downloadSpeed: 2048, connections: 8, errorMessage: '' },
-              { gid: 'g2', name: 'old.mp4', kind: 'MP4', status: 'complete', totalLength: 200, completedLength: 200, downloadSpeed: 0, connections: 0, errorMessage: '' }
+              { gid: 'g1', name: 'movie.mp4', kind: 'MP4', status: 'active', totalLength: 1000, completedLength: 512, downloadSpeed: 2048, connections: 8, errorMessage: '', files: [{ path: '/Users/x/Downloads/VideoGrab/movie.mp4' }] },
+              { gid: 'g2', name: 'old.mp4', kind: 'MP4', status: 'complete', totalLength: 200, completedLength: 200, downloadSpeed: 0, connections: 0, errorMessage: '', files: [{ path: '/Users/x/Downloads/VideoGrab/old.mp4' }] }
             ]
           };
           case 'helper:jobs': return {
@@ -103,6 +103,7 @@ const { window } = dom;
 const { document } = window;
 
 window.chrome = makeChrome();
+window.confirm = () => true;
 document.execCommand = () => {          // 模拟 execCommand 复制
   const ta = document.querySelector('textarea');
   if (ta) clipboard.push(ta.value);
@@ -179,7 +180,27 @@ await sleep(220);
 const jobs = $$('#jobList .job');
 check('任务面板 3 个', jobs.length === 3, String(jobs.length));
 check('进度条宽度', jobs[0].querySelector('.bar > i')?.style.width === '51.2%');
-check('任务按钮是文字', $$('#jobList button').every((b) => /^[\u4e00-\u9fa5]+$/.test(b.textContent.trim())), $$('#jobList button').map((b) => b.textContent).join('/'));
+const jobBtns = $$('#jobList button').map((b) => b.textContent.trim());
+check('任务按钮都是文字', jobBtns.every((t) => /^[\u4e00-\u9fa5]+$/.test(t)), jobBtns.join('/'));
+const activeJob = $$('#jobList .job').find((el) => el.textContent.includes('movie.mp4'));
+const doneJob = $$('#jobList .job').find((el) => el.textContent.includes('old.mp4'));
+check('进行中：有暂停和取消', activeJob.textContent.includes('暂停') && activeJob.textContent.includes('取消'));
+check('已完成：不显示暂停', !doneJob.textContent.includes('暂停') && !doneJob.textContent.includes('取消'));
+check('已完成：有删除文件', doneJob.textContent.includes('删除文件'));
+check('已完成：有删除记录', doneJob.textContent.includes('删除记录'));
+check('已完成：样式带 done', doneJob.classList.contains('done'));
+
+// 删除文件：先确认，再发 file:delete
+click([...doneJob.querySelectorAll('button')].find((b) => b.textContent.includes('删除文件')));
+await sleep(150);
+check('删除文件发出请求', sent.includes('file:delete'), sent.join(','));
+check('删除后同步删记录', sent.includes('job:forget'));
+
+// 删除记录（不删文件）
+const before = sent.filter((x) => x === 'file:delete').length;
+click([...doneJob.querySelectorAll('button')].find((b) => b.textContent.includes('删除记录')));
+await sleep(150);
+check('删除记录不发 file:delete', sent.filter((x) => x === 'file:delete').length === before);
 
 // 9. 筛选
 click($('#tabSniff'));

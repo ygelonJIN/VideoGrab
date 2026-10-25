@@ -388,23 +388,38 @@ function aria2JobEl(j) {
   const el = document.createElement('li');
   const status = j.status || 'unknown';
   const running = ['active', 'waiting', 'paused'].includes(status);
-  el.className = `job ${running ? 'running' : ''} ${status === 'error' ? 'err' : ''}`;
   const done = status === 'complete';
+  el.className = `job ${running ? 'running' : ''} ${done ? 'done' : ''} ${status === 'error' ? 'err' : ''}`;
+
   const p = done ? 100 : pct(j);
   const speed = Number(j.downloadSpeed) || 0;
   const conns = Number(j.connections) || 0;
+  const filePath = (j.files && j.files[0] && j.files[0].path) || '';
+  const name = j.name || j.url;
+
   const meta = [];
   if (j.totalLength) meta.push(`${humanBytes(j.completedLength)} / ${humanBytes(j.totalLength)}`);
   if (speed > 0) meta.push(humanBytes(speed) + '/s');
   if (conns > 0) meta.push(`${conns} 线程`);
   meta.push(statusText(status));
 
+  let ops = '';
+  if (status === 'active' || status === 'waiting') {
+    ops = `<button class="mini" data-job="${esc(j.gid)}" data-op="pause">暂停</button>
+           <button class="mini" data-job="${esc(j.gid)}" data-op="remove">取消</button>`;
+  } else if (status === 'paused') {
+    ops = `<button class="mini" data-job="${esc(j.gid)}" data-op="unpause">继续</button>
+           <button class="mini" data-job="${esc(j.gid)}" data-op="remove">取消</button>`;
+  } else {
+    ops = `${filePath ? `<button class="mini danger" data-del="${esc(filePath)}" data-gid="${esc(j.gid)}" data-name="${esc(name)}">删除文件</button>` : ''}
+           <button class="mini" data-forget="${esc(j.gid)}">删除记录</button>`;
+  }
+
   el.innerHTML = `
     <div class="j-top">
       <span class="badge k-${esc(j.kind || 'MP4')}">aria2</span>
-      <span class="j-name" title="${esc(j.name || '')}">${esc(j.name || j.url)}</span>
-      <button class="mini" data-job="${esc(j.gid)}" data-op="${status === 'paused' ? 'unpause' : 'pause'}">${status === 'paused' ? '继续' : '暂停'}</button>
-      <button class="mini" data-job="${esc(j.gid)}" data-op="remove">取消</button>
+      <span class="j-name" title="${esc(name)}">${esc(name)}</span>
+      ${ops}
     </div>
     <div class="bar ${done ? 'done' : ''}"><i style="width:${p.toFixed(1)}%"></i></div>
     <div class="j-meta">${meta.map(esc).join('<i>·</i>')}</div>
@@ -415,21 +430,28 @@ function aria2JobEl(j) {
 function helperJobEl(j) {
   const el = document.createElement('li');
   const running = j.status === 'running' || j.status === 'queued';
-  el.className = `job ${running ? 'running' : ''} ${j.status === 'error' ? 'err' : ''}`;
-  const p = j.status === 'done' ? 100 : Math.max(0, Math.min(100, Number(j.progress) || 0));
+  const done = j.status === 'done';
+  el.className = `job ${running ? 'running' : ''} ${done ? 'done' : ''} ${j.status === 'error' ? 'err' : ''}`;
+
+  const p = done ? 100 : Math.max(0, Math.min(100, Number(j.progress) || 0));
   const meta = [];
-  if (j.status === 'done') meta.push('已完成');
+  if (done) meta.push('已完成');
   if (j.speed) meta.push(humanBytes(j.speed) + '/s');
   if (j.status === 'running') meta.push(p.toFixed(0) + '%');
   meta.push(j.type === 'hls' ? 'ffmpeg 合并' : 'aria2/curl');
+
+  const ops = running
+    ? `<button class="mini" data-hjob="${esc(j.id)}" data-op="cancel">取消</button>`
+    : `<button class="mini danger" data-hdel="${esc(j.out || '')}" data-hid="${esc(j.id)}" data-name="${esc(j.name || '')}">删除文件</button>
+       <button class="mini" data-hforget="${esc(j.id)}">删除记录</button>`;
 
   el.innerHTML = `
     <div class="j-top">
       <span class="badge k-HLS">助手</span>
       <span class="j-name" title="${esc(j.name || '')}">${esc(j.name || j.url)}</span>
-      ${running ? `<button class="mini" data-hjob="${esc(j.id)}" data-op="cancel">取消</button>` : ''}
+      ${ops}
     </div>
-    <div class="bar ${j.status === 'done' ? 'done' : ''}"><i style="width:${p.toFixed(1)}%"></i></div>
+    <div class="bar ${done ? 'done' : ''}"><i style="width:${p.toFixed(1)}%"></i></div>
     <div class="j-meta">${meta.map(esc).join('<i>·</i>')}</div>
     ${j.error ? `<div class="j-err">${esc(j.error)}</div>` : ''}`;
   return el;
@@ -546,9 +568,56 @@ async function onListClick(e) {
   return openDetail(item);
 }
 
+async function dropJobRecord(gid) {
+  try {
+    const got = await chrome.storage.local.get('jobs');
+    await chrome.storage.local.set({ jobs: (got.jobs || []).filter((j) => j.gid !== gid) });
+  } catch { /* 忽略 */ }
+}
+
+async function deleteAria2File(gid, path, name) {
+  if (!path) return toast('拿不到文件路径，只能删记录', true);
+  if (!window.confirm(`从磁盘删除？\n${name}\n\n删了就找不回来了。`)) return;
+  const r = await send('file:delete', { path });
+  if (!r?.ok) return toast(r.error || '删除失败', true);
+  await send('job:forget', { gid });
+  await dropJobRecord(gid);
+  toast('文件已从磁盘删除');
+  refreshJobs();
+}
+
+async function forgetAria2(gid) {
+  await send('job:forget', { gid });
+  await dropJobRecord(gid);
+  toast('记录已删除，文件还在');
+  refreshJobs();
+}
+
+async function deleteHelperFile(id, path, name) {
+  if (!path) return toast('拿不到文件路径，只能删记录', true);
+  if (!window.confirm(`从磁盘删除？\n${name}\n\n删了就找不回来了。`)) return;
+  const r = await send('file:delete', { path });
+  if (!r?.ok) return toast(r.error || '删除失败', true);
+  await send('helper:forget', { id });
+  toast('文件已从磁盘删除');
+  refreshJobs();
+}
+
+async function forgetHelper(id) {
+  await send('helper:forget', { id });
+  toast('记录已删除，文件还在');
+  refreshJobs();
+}
+
 async function onJobClick(e) {
-  const b = e.target.closest('button[data-op]');
+  const b = e.target.closest('button');
   if (!b) return;
+
+  if (b.dataset.del) return deleteAria2File(b.dataset.gid, b.dataset.del, b.dataset.name);
+  if (b.dataset.forget) return forgetAria2(b.dataset.forget);
+  if (b.dataset.hdel) return deleteHelperFile(b.dataset.hid, b.dataset.hdel, b.dataset.name);
+  if (b.dataset.hforget) return forgetHelper(b.dataset.hforget);
+
   if (b.dataset.job) {
     const r = await send('aria2:op', { gid: b.dataset.job, op: b.dataset.op });
     if (!r?.ok) toast(r?.error || '操作失败', true);
