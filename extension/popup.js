@@ -174,7 +174,7 @@ function detailEl(item) {
   } else if (d.loading) {
     thumb = '<div class="ph">抓预览帧…</div>';
   } else if (d.err) {
-    thumb = `<div class="ph">无法预览<br><span class="ph-sub">${esc(String(d.err).slice(0, 80))}</span></div>`;
+    thumb = `<div class="ph">无法预览<br><span class="ph-sub">${esc(String(d.err).slice(0, 90))}</span></div>`;
   } else {
     thumb = '<div class="ph">无预览</div>';
   }
@@ -206,7 +206,10 @@ function detailEl(item) {
       <div class="info">
         ${facts.length ? `<div class="facts">${facts.map(esc).join('<i>·</i>')}</div>` : '<div class="facts dim">暂无元信息</div>'}
         ${streamFacts.length ? `<div class="facts soft">${streamFacts.map(esc).join('<i>·</i>')}</div>` : ''}
-        ${d.err ? `<div class="hintline">${errHint(d.err)}</div>` : ''}
+        ${d.err ? `<div class="hintline">${errHint(d.err)}</div>
+        <div class="acts" style="margin-top:6px">
+          <button class="mini" data-act="diagcmd">复制诊断命令</button>
+        </div>` : ''}
       </div>
     </div>
     ${hls?.type === 'master' ? variantsHtml(hls) : ''}
@@ -215,6 +218,19 @@ function detailEl(item) {
     </div>
   `;
   return li;
+}
+
+function diagCommand(item) {
+  const h = item.headers || {};
+  const q = (s) => '"' + String(s).replace(/(["\\$`])/g, '\\$1') + '"';
+  const parts = ['curl -sS -o /dev/null -D -'];
+  if (h.ua) parts.push('-A ' + q(h.ua));
+  if (h.referer) parts.push('-H ' + q('Referer: ' + h.referer));
+  if (h.origin) parts.push('-H ' + q('Origin: ' + h.origin));
+  if (h.cookie) parts.push('-H ' + q('Cookie: ' + h.cookie));
+  parts.push('-r 0-1');
+  parts.push(q(item.url));
+  return parts.join(' ');
 }
 
 function errHint(err) {
@@ -512,6 +528,7 @@ async function onListClick(e) {
     const act = btn.dataset.act;
     if (btn.tagName === 'A') e.preventDefault();
     if (act === 'copy') return actCopy(item.url);
+    if (act === 'diagcmd') return actCopy(diagCommand(item), '诊断命令');
     if (act === 'aria2') return actAria2([item]);
     if (act === 'browser') return actBrowser(item);
     if (act === 'helper') return actHelper(item);
