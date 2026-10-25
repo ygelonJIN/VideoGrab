@@ -4,6 +4,10 @@ Chrome 扩展 + 本地助手。嗅探页面里的 **MP4 / M3U8 / DASH / WebM / T
 把捕获到的**真实 Referer、User-Agent、Cookie** 一起交给 **aria2**（多线程）或 **ffmpeg**（流合并），
 不用再手动 Copy as cURL、不用记那一长串参数。
 
+![面板](screenshots/list.png)
+
+<sub>左：列表（MP4 走 aria2，HLS 走解析/助手）· 右：解析出来的分片数、时长、加密状态</sub>
+
 ---
 
 ## 解决什么问题
@@ -14,6 +18,8 @@ Chrome 扩展 + 本地助手。嗅探页面里的 **MP4 / M3U8 / DASH / WebM / T
 | 直链有防盗链，浏览器能下、curl 403 | 头是从页面请求里抓的，原样转发，403 自然消失 |
 | M3U8 要记 `-protocol_whitelist` / `-extension_picky 0` 一长串 | 解析后一键复制命令，或直接交给助手跑 |
 | 一页里好几个视频，要一个个复制 | 勾选批量入队 / 导出 aria2 `-i` 任务文件 |
+
+![解析](screenshots/detail.png)
 
 ---
 

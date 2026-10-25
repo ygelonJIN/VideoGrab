@@ -208,6 +208,12 @@ for (const [js, html] of [['popup.js', 'popup.html'], ['options.js', 'options.ht
   }
 }
 
+// CSS 里 [hidden] 必须压得住 display:flex，否则空状态会盖在列表上
+const css = fs.readFileSync(path.join(EXT, 'popup.css'), 'utf8');
+check('popup.css 有空状态 [hidden] 规则', css.includes('.empty[hidden]'));
+check('popup.css 有 pane [hidden] 规则', css.includes('.pane[hidden]'));
+check('popup.css 有 toast [hidden] 规则', css.includes('.toast[hidden]'));
+
 // ---------------------------------------------------------------- 结果
 console.log(results.join('\n'));
 console.log(`\n通过 ${pass}，失败 ${fail}`);

@@ -126,7 +126,7 @@ function opsHtml(item) {
   if (isStream) {
     return `
       <button class="mini" data-act="parse">解析</button>
-      <button class="mini" data-act="helper" title="交给本地助手用 ffmpeg 合并">⇢</button>
+      <button class="mini" data-act="helper" title="交给本地助手用 ffmpeg 合并">助手</button>
       <button class="mini" data-act="copy" title="复制链接">⧉</button>`;
   }
   return `
