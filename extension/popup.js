@@ -26,8 +26,13 @@ const state = {
   lastSig: ''
 };
 
-function send(type, payload = {}) {
-  return chrome.runtime.sendMessage({ type, ...payload });
+async function send(type, payload = {}) {
+  const r = await chrome.runtime.sendMessage({ type, ...payload });
+  // 后台是旧代码认不出新消息时，别让用户看到"未知消息 xxx"
+  if (r && r.ok === false && /未知消息/.test(String(r.error || ''))) {
+    return { ...r, error: '扩展后台还是旧代码：去 chrome://extensions 点一下刷新按钮，再重开这个面板' };
+  }
+  return r;
 }
 
 // ------------------------------------------------------------------ 启动
