@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * 弹窗渲染测试：用 jsdom 载入 popup.html，把 common.js + popup.js 合成一段脚本跑起来，
- * 用假 chrome API 喂数据，检查列表/解析/任务面板是否正常渲染。
- * 用法：node tools/popup-test.mjs   （需要 jsdom：在 /tmp/vgdom 里 npm i jsdom）
+ * 弹窗渲染测试：jsdom 载入 popup.html，把 common.js + popup.js 拼成一段脚本跑，
+ * 假 chrome API 喂数据，检查列表、点开的预览、任务面板。
+ * 用法：node tools/popup-test.mjs （需要 jsdom：/tmp/vgdom 里 npm i jsdom）
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -23,13 +23,13 @@ const check = (name, cond, detail = '') => {
   else { fail++; log.push('❌ ' + name + (detail ? '  — ' + detail : '')); }
 };
 
-// ---------------------------------------------------------------- 合成脚本
 const common = fs.readFileSync(path.join(EXT, 'common.js'), 'utf8').replace(/^export /gm, '');
 const popup = fs.readFileSync(path.join(EXT, 'popup.js'), 'utf8')
   .replace(/^import\s*\{[\s\S]*?\}\s*from\s*'\.\/common\.js';/m, '');
 const bundle = `${common}\n${popup}`;
 
-// ---------------------------------------------------------------- 假数据
+const JPEG = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA==';
+
 const ITEMS = [
   {
     url: 'https://cdn.com/v/movie.mp4?sig=1', kind: 'MP4', name: 'movie.mp4',
@@ -54,15 +54,18 @@ function makeChrome() {
         sent.push(msg.type);
         switch (msg.type) {
           case 'media:list': return { ok: true, items: ITEMS, segCount: 3 };
-          case 'diag': return { ok: true, aria2: true, helper: true, aria2Info: { version: '1.37' } };
-          case 'hls:parse': return {
-            ok: true, result: {
-              type: 'media', segments: 42, duration: 7261, encrypted: true,
-              keyUri: 'https://cdn.com/key/1', live: false
+          case 'diag': return { ok: true, aria2: true, helper: true };
+          case 'probe': return {
+            ok: true, media: {
+              duration: 7261, width: 1920, height: 1080, bitrate: 4000000,
+              videoCodec: 'h264', audioCodec: 'aac', thumbnail: JPEG, thumbAt: 10
             }
           };
+          case 'hls:parse': return {
+            ok: true, result: { type: 'media', segments: 128, duration: 7261, encrypted: true, keyUri: 'https://cdn/key', live: false }
+          };
           case 'hls:ffmpeg': return { ok: true, command: 'ffmpeg -i x -c copy y.mp4' };
-          case 'dl:txt': return { ok: true, text: 'https://cdn.com/v/movie.mp4\n  header=Referer: x\n' };
+          case 'dl:txt': return { ok: true, text: 'https://cdn/v/movie.mp4\n  header=Referer: x\n' };
           case 'dl:aria2': return { ok: true, gids: [{ gid: 'g1', url: msg.items[0].url, name: 'movie.mp4', kind: 'MP4' }], errors: [] };
           case 'dl:browser': return { ok: true };
           case 'aria2:status': return {
@@ -92,7 +95,6 @@ function makeChrome() {
   };
 }
 
-// ---------------------------------------------------------------- 跑起来
 const html = fs.readFileSync(path.join(EXT, 'popup.html'), 'utf8');
 const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'https://site.com/watch' });
 const { window } = dom;
@@ -105,81 +107,80 @@ Object.defineProperty(window.navigator, 'clipboard', {
   configurable: true
 });
 window.eval(bundle);
-await sleep(120);
+await sleep(150);
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
+const click = (el) => el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 
-// 1. 列表渲染
+// 1. 列表
 const rows = $$('li.row');
 check('列表渲染 2 行', rows.length === 2, String(rows.length));
 check('计数徽章 = 2', $('#cnt').textContent === '2', $('#cnt').textContent);
-check('MP4 类型徽章', rows[0].querySelector('.badge').textContent === 'MP4', rows[0].querySelector('.badge')?.textContent);
-check('体积格式化', rows[0].querySelector('.meta').textContent.includes('1.3 GB'), rows[0].querySelector('.meta').textContent);
-check('分片折叠提示', $('#hint').textContent.includes('3 个分片'), $('#hint').textContent);
-check('空状态隐藏', $('#empty').hidden === true);
+check('体积格式化', rows[0].querySelector('.meta').textContent.includes('1.3 GB'));
+check('分片折叠提示', $('#hint').textContent.includes('3 个分片'));
 
-// 2. HLS 行有「解析」按钮，MP4 行是 ⚡
-check('HLS 行有解析', rows[1].querySelector('[data-act="parse"]') !== null);
-check('MP4 行有 aria2', rows[0].querySelector('[data-act="aria2"]') !== null);
+// 2. 纯文字按钮：不能有图标符号
+const btnTexts = $$('button').map((b) => b.textContent.trim()).filter(Boolean);
+const bad = btnTexts.filter((t) => /[^\u4e00-\u9fa5A-Za-z0-9 .+\-]/.test(t));
+check('按钮全是文字（无图标）', bad.length === 0, bad.join(' / '));
+check('没有残留 img 图标', $$('header img').length === 0);
 
-// 3. 点解析 → 展开面板
-rows[1].querySelector('[data-act="parse"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-await sleep(120);
+// 3. 点行 → 预览
+click(rows[0].querySelector('.main'));
+await sleep(150);
 const detail = $('li.detail');
-check('解析面板出现', detail !== null);
-check('解析显示分片数', detail?.textContent.includes('42 个分片'), detail?.textContent?.slice(0, 80));
-check('解析显示时长', detail?.textContent.includes('2:01:01'), detail?.textContent?.slice(0, 120));
-check('解析显示加密', detail?.textContent.includes('AES 加密'));
-check('面板里有 ffmpeg 按钮', detail?.querySelector('[data-act="ffmpeg"]') !== null);
+check('点名称展开详情', detail !== null);
+check('详情里有缩略图', detail?.querySelector('.thumb img')?.getAttribute('src')?.startsWith('data:image/jpeg'));
+check('详情显示时长', detail?.textContent.includes('2:01:01'), detail?.textContent.slice(0, 80));
+check('详情显示分辨率', detail?.textContent.includes('1920×1080'));
+check('详情显示编码', detail?.textContent.includes('h264 / aac'));
+check('MP4 详情有 aria2', detail?.textContent.includes('aria2 下载'));
+check('MP4 详情没有 ffmpeg', !detail?.textContent.includes('ffmpeg'));
 
-// 4. 点面板里的「复制 ffmpeg 命令」
-detail.querySelector('[data-act="ffmpeg"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-await sleep(120);
-check('复制 ffmpeg 命令', clipboard.some((c) => c.includes('ffmpeg')), JSON.stringify(clipboard));
-
-// 5. 点复制链接（列表已重渲染，重新取节点）
-$$('li.row')[0].querySelector('[data-act="copy"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+// 4. 详情里复制链接
+click(detail.querySelector('[data-act="copy"]'));
 await sleep(60);
-check('复制链接', clipboard.some((c) => c.includes('movie.mp4')));
+check('详情里复制链接', clipboard.some((c) => c.includes('movie.mp4')));
 
-// 6. 全选 + 批量
+// 5. 收起
+click($$('li.row')[0].querySelector('.main'));
+await sleep(60);
+check('再点一次收起', $('li.detail') === null);
+
+// 6. HLS 行：详情有 ffmpeg 和分片信息
+click($$('li.row')[1].querySelector('.main'));
+await sleep(200);
+const d2 = $('li.detail');
+check('HLS 详情有 ffmpeg 命令', d2?.textContent.includes('复制 ffmpeg 命令'));
+check('HLS 详情有分片数', d2?.textContent.includes('128 个分片'), d2?.textContent.slice(0, 120));
+check('HLS 详情有加密标记', d2?.textContent.includes('AES 加密'));
+check('HLS 行没有 aria2 按钮', !d2?.textContent.includes('aria2 下载'));
+
+// 7. 全选 + 批量
 $('#selAll').checked = true;
 $('#selAll').dispatchEvent(new window.Event('change', { bubbles: true }));
-await sleep(30);
-check('全选后提示', $('#selInfo').textContent.includes('已选 2'), $('#selInfo').textContent);
-
-$('#btnAria2').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await sleep(40);
+check('全选提示', $('#selInfo').textContent.includes('已选 2'), $('#selInfo').textContent);
+click($('#btnAria2'));
 await sleep(150);
 check('批量 aria2 发出请求', sent.includes('dl:aria2'));
 
-// 7. 任务面板
-$('#tabJobs').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-await sleep(200);
+// 8. 任务面板
+click($('#tabJobs'));
+await sleep(220);
 const jobs = $$('#jobList .job');
-check('任务面板 3 个任务', jobs.length === 3, String(jobs.length));
-check('aria2 进度条', jobs[0].querySelector('.bar > i')?.style.width === '51.2%', jobs[0].querySelector('.bar > i')?.style.width);
-check('任务里有 ffmpeg 助手任务', $('#jobList').textContent.includes('ffmpeg 合并'));
+check('任务面板 3 个', jobs.length === 3, String(jobs.length));
+check('进度条宽度', jobs[0].querySelector('.bar > i')?.style.width === '51.2%');
+check('任务按钮是文字', $$('#jobList button').every((b) => /^[\u4e00-\u9fa5]+$/.test(b.textContent.trim())), $$('#jobList button').map((b) => b.textContent).join('/'));
 
-// 8. 任务面板隐藏底部工具条
-check('任务面板隐藏底栏', $('#bar').style.display === 'none', $('#bar').style.display);
-
-// 9. 搜索过滤
-$('#tabSniff').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-await sleep(30);
-$('#q').value = 'm3u8';
-$('#q').dispatchEvent(new window.Event('input', { bubbles: true }));
-await sleep(30);
-check('搜索过滤剩 1 行', $$('li.row').length === 1, String($$('li.row').length));
-$('#q').value = '';
-$('#q').dispatchEvent(new window.Event('input', { bubbles: true }));
-
-// 10. 类型筛选
-await sleep(30);
+// 9. 筛选
+click($('#tabSniff'));
+await sleep(40);
 $('#kind').value = 'stream';
 $('#kind').dispatchEvent(new window.Event('change', { bubbles: true }));
-await sleep(30);
-check('筛选只看流', $$('li.row').length === 1 && $$('li.row')[0].textContent.includes('HLS'));
+await sleep(40);
+check('只看流', $$('li.row').length === 1 && $$('li.row')[0].textContent.includes('HLS'));
 
 console.log(log.join('\n'));
 console.log(`\n通过 ${pass}，失败 ${fail}`);

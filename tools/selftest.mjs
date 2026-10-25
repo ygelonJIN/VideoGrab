@@ -115,6 +115,9 @@ globalThis.fetch = async (url, init) => {
     rpcBodies.push(JSON.parse(init.body));
     return { ok: true, json: async () => ({ result: 'gid-' + rpcBodies.length }) };
   }
+  if (String(url).includes('/api/probe')) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, media: { duration: 42, width: 1280, height: 720, thumbnail: 'data:image/jpeg;base64,xxxx' } }) };
+  }
   return { ok: true, text: async () => media, status: 200 };
 };
 
@@ -175,6 +178,10 @@ check('dl:aria2 传了并发', rpcOpt['max-connection-per-server'] === '16' && r
 
 res = await send({ type: 'dl:aria2', items: [{ ...mp4, kind: 'HLS', url: 'https://cdn.com/x.m3u8' }] });
 check('dl:aria2 拒绝 HLS', res.ok && res.errors.length === 1 && res.gids.length === 0);
+
+res = await send({ type: 'probe', item: mp4 });
+check('probe 返回元信息', res.ok && res.media.duration === 42, JSON.stringify(res).slice(0, 160));
+check('probe 带缩略图', String(res.media?.thumbnail || '').startsWith('data:image/jpeg'));
 
 res = await send({ type: 'hls:parse', item: { url: 'https://cdn.com/x/index.m3u8', headers: {} } });
 check('hls:parse 走 fetch 兜底', res.ok && res.result.type === 'media', JSON.stringify(res).slice(0, 200));

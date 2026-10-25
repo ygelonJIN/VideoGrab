@@ -32,6 +32,7 @@ const which = (bin) => {
 };
 
 const FFMPEG = which('ffmpeg');
+const FFPROBE = which('ffprobe');
 const ARIA2C = which('aria2c');
 const CURL = which('curl');
 
@@ -133,6 +134,133 @@ function watchOutput(job) {
     }
   }, 900);
   return () => clearInterval(timer);
+}
+
+
+// ---------------------------------------------------------------- 预览探针
+const probeCache = new Map();      // key -> {at, data}
+const PROBE_TTL = 10 * 60 * 1000;
+let probing = 0;
+
+// HLS 专有的参数不能喂给 MP4，否则 ffmpeg 会报 "Option not found"
+const HLS_OPTS = ['-allowed_extensions', 'ALL', '-allowed_segment_extensions', 'ALL', '-extension_picky', '0'];
+
+function inputOpts(headers = {}, hls = false) {
+  const args = [];
+  const hdr = headerEntries(headers).filter(([k]) => k !== 'User-Agent')
+    .map(([k, v]) => `${k}: ${v}`).join('\r\n');
+  if (hdr) args.push('-headers', hdr + '\r\n');
+  if (headers.ua) args.push('-user_agent', headers.ua);
+  args.push('-protocol_whitelist', 'file,http,https,tcp,tls,crypto');
+  if (hls) args.push(...HLS_OPTS);
+  args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
+  return args;
+}
+
+function runCapture(bin, args, timeoutMs = 25000) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, timeoutMs);
+    child.stdout.on('data', (d) => chunks.push(d));
+    child.stderr.on('data', (d) => { err = (err + d).slice(-1200); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, out: Buffer.concat(chunks), err });
+    });
+    child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out: Buffer.alloc(0), err: e.message }); });
+  });
+}
+
+const lastLine = (s) => String(s || '').split('\n').map((x) => x.trim()).filter(Boolean).slice(-1)[0] || '';
+
+function parseMeta(raw) {
+  const meta = { duration: 0, width: 0, height: 0, bitrate: 0, videoCodec: '', audioCodec: '', thumbnail: '' };
+  try {
+    const j = JSON.parse(raw.toString('utf8'));
+    const v = (j.streams || []).find((s) => s.codec_type === 'video');
+    const a = (j.streams || []).find((s) => s.codec_type === 'audio');
+    meta.duration = Math.round(Number(j.format?.duration) || 0);
+    meta.width = v?.width || 0;
+    meta.height = v?.height || 0;
+    meta.bitrate = Number(j.format?.bit_rate) || 0;
+    meta.videoCodec = v?.codec_name || '';
+    meta.audioCodec = a?.codec_name || '';
+  } catch { /* 忽略 */ }
+  return meta;
+}
+
+async function grabFrame(url, opts, at) {
+  const head = ['-v', 'error', '-nostdin', ...opts];
+  const tail = ['-frames:v', '1', '-vf', 'scale=480:-2', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'];
+  // 先试输入端快进，再试从头抓（有的源不支持 seek）
+  const variants = [
+    [...head, '-ss', String(at), '-i', url, ...tail],
+    [...head, '-i', url, ...tail]
+  ];
+  for (const args of variants) {
+    const r = await runCapture('ffmpeg', args, 30000);
+    if (r.code === 0 && r.out.length > 500) {
+      return { dataUrl: 'data:image/jpeg;base64,' + r.out.toString('base64'), at };
+    }
+  }
+  return null;
+}
+
+async function probeOnce(url, headers, hls) {
+  const opts = inputOpts(headers, hls);
+  const p = await runCapture('ffprobe', [
+    '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', ...opts, '-i', url
+  ]);
+  if (p.code !== 0) throw new Error(lastLine(p.err) || 'ffprobe 打不开这个地址');
+  const meta = parseMeta(p.out);
+  // HLS 跳转便宜（按分片取），MP4 远程 seek 可能要拉很多字节，跨度压小
+  const cap = hls ? 600 : 60;
+  const at = meta.duration > cap ? cap : Math.max(1, Math.round(meta.duration / 3));
+  const frame = await grabFrame(url, opts, at);
+  if (frame) {
+    meta.thumbnail = frame.dataUrl;
+    meta.thumbAt = frame.at;
+  } else {
+    meta.probeError = '元信息拿到了，但抓帧失败';
+  }
+  return meta;
+}
+
+async function probeMedia(url, headers) {
+  const key = url + '|' + (headers.referer || '') + '|' + (headers.cookie || '').slice(0, 24);
+  const hit = probeCache.get(key);
+  if (hit && Date.now() - hit.at < PROBE_TTL) return hit.data;
+
+  const ffmpeg = which('ffmpeg');
+  const ffprobe = which('ffprobe');
+  if (!ffmpeg || !ffprobe) throw new Error('找不到 ffmpeg / ffprobe');
+  if (probing >= 3) throw new Error('预览任务太多，稍等一下');
+
+  const looksHls = /\.m3u8?(\?|$)/i.test(url) || /mpegurl|m3u8/i.test(url);
+  const order = looksHls ? [true, false] : [false, true];
+
+  probing++;
+  try {
+    let lastErr = null;
+    for (const hls of order) {
+      try {
+        const meta = await probeOnce(url, headers, hls);
+        probeCache.set(key, { at: Date.now(), data: meta });
+        if (probeCache.size > 60) {
+          const oldest = [...probeCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+          if (oldest) probeCache.delete(oldest[0]);
+        }
+        return meta;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error('预览失败');
+  } finally {
+    probing--;
+  }
 }
 
 // ---------------------------------------------------------------- 参数拼装
@@ -354,7 +482,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/health' && req.method === 'GET') {
       return json(res, 200, {
         ok: true, version: VERSION, home: HOME, defaultOut: DEFAULT_OUT,
-        ffmpeg: Boolean(FFMPEG), ffmpegPath: FFMPEG,
+        ffmpeg: Boolean(FFMPEG), ffmpegPath: FFMPEG, ffprobe: Boolean(FFPROBE),
         aria2c: Boolean(ARIA2C), aria2cPath: ARIA2C,
         curl: Boolean(CURL), concurrency: CONCURRENCY
       });
@@ -369,6 +497,17 @@ const server = http.createServer(async (req, res) => {
       });
       const text = await r.text();
       return json(res, 200, { status: r.status, text: text.slice(0, 4 * 1024 * 1024) });
+    }
+
+    if (p === '/api/probe' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!body.url) return json(res, 400, { error: '缺 url' });
+      try {
+        const media = await probeMedia(body.url, body.headers || {});
+        return json(res, 200, { ok: true, media });
+      } catch (e) {
+        return json(res, 200, { ok: false, error: e?.message || String(e) });
+      }
     }
 
     if (p === '/api/jobs' && req.method === 'POST') {
@@ -415,6 +554,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`视频下载器助手已启动 http://127.0.0.1:${PORT}`);
   console.log(`  ffmpeg : ${FFMPEG || '未安装（M3U8 合并不可用）'}`);
+  console.log(`  ffprobe: ${FFPROBE || '未安装（预览元信息不可用）'}`);
   console.log(`  aria2c : ${ARIA2C || '未安装（自动退回 curl 单连接）'}`);
   console.log(`  输出目录: ${DEFAULT_OUT}`);
 });

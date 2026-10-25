@@ -275,6 +275,16 @@ async function handle(msg) {
       const s = await getSettings();
       return { text: aria2InputText(msg.items, s) };
     }
+    case 'probe': {
+      const s = await getSettings();
+      const r = await helperCall(s, '/api/probe', {
+        method: 'POST',
+        body: JSON.stringify({ url: msg.item.url, headers: msg.item.headers || {} })
+      }, 45000);
+      if (r && r.ok === false) throw new Error(r.error || '预览失败');
+      if (!r || !r.media) throw new Error('助手没有返回预览数据');
+      return { media: r.media };
+    }
     case 'hls:parse': {
       const s = await getSettings();
       const item = msg.item;
