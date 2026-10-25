@@ -45,6 +45,7 @@ const ITEMS = [
 
 const clipboard = [];
 const sent = [];
+let helperOnline = true;
 
 function makeChrome() {
   return {
@@ -54,7 +55,7 @@ function makeChrome() {
         sent.push(msg.type);
         switch (msg.type) {
           case 'media:list': return { ok: true, items: ITEMS, segCount: 3 };
-          case 'diag': return { ok: true, aria2: true, helper: true };
+          case 'diag': return { ok: true, aria2: true, helper: helperOnline };
           case 'probe': return {
             ok: true, media: {
               duration: 7261, width: 1920, height: 1080, bitrate: 4000000,
@@ -68,6 +69,7 @@ function makeChrome() {
           case 'dl:txt': return { ok: true, text: 'https://cdn/v/movie.mp4\n  header=Referer: x\n' };
           case 'dl:aria2': return { ok: true, gids: [{ gid: 'g1', url: msg.items[0].url, name: 'movie.mp4', kind: 'MP4' }], errors: [] };
           case 'dl:browser': return { ok: true };
+          case 'helper:submit': return helperOnline ? { ok: true } : { ok: false, error: '助手没在运行（127.0.0.1:8765 连不上）' };
           case 'aria2:status': return {
             ok: true, dead: [], list: [
               { gid: 'g1', name: 'movie.mp4', kind: 'MP4', status: 'active', totalLength: 1000, completedLength: 512, downloadSpeed: 2048, connections: 8, errorMessage: '' },
@@ -186,6 +188,32 @@ $('#kind').value = 'stream';
 $('#kind').dispatchEvent(new window.Event('change', { bubbles: true }));
 await sleep(40);
 check('只看流', $$('li.row').length === 1 && $$('li.row')[0].textContent.includes('HLS'));
+
+// 11. 助手没开时的引导面板
+check('引导面板默认隐藏', $('#sheet').hidden === true);
+helperOnline = false;
+$('#q').value = ''; $('#kind').value = '';
+$('#kind').dispatchEvent(new window.Event('change', { bubbles: true }));
+await sleep(40);
+const hlsRow = $$('li.row').find((r) => r.textContent.includes('HLS'));
+click(hlsRow.querySelector('[data-act="helper"]'));
+await sleep(120);
+check('点「交给助手」弹出引导', $('#sheet').hidden === false);
+check('引导里有启动命令', $('#sheetCmd').textContent.includes('start.sh'));
+check('引导里有终端提示', $('#sheet').textContent.includes('终端'));
+
+click($('#sheetRecheck'));
+await sleep(120);
+check('重新检测：仍连不上', $('#sheetState').textContent.includes('还是连不上'), $('#sheetState').textContent);
+
+helperOnline = true;
+click($('#sheetRecheck'));
+await sleep(120);
+check('重新检测：连上了', $('#sheetState').textContent.includes('连上了'), $('#sheetState').textContent);
+
+click($('#sheetClose'));
+await sleep(40);
+check('引导可关闭', $('#sheet').hidden === true);
 
 console.log(log.join('\n'));
 console.log(`\n通过 ${pass}，失败 ${fail}`);

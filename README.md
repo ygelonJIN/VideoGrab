@@ -63,6 +63,10 @@ aria2c --enable-rpc --rpc-allow-origin-all --rpc-listen-all=false \
 
 注意：**能直连的站别让它走代理**，绕远路反而慢。所以"自动"比"填死地址"更合适。
 
+![助手引导](screenshots/helper-sheet.png)
+
+<sub>助手没开时点「交给助手」，会直接弹出这四步；第 4 步点「重新检测」能立刻知道连上没有</sub>
+
 ### 3. 本地助手（M3U8 合并，可选）
 
 ```bash

@@ -54,6 +54,56 @@
     <button id="btnTxt" class="ghost" title="生成 aria2 的 -i 任务文件，里面已经写好 Referer / Cookie；终端跑 aria2c -i 这个文件就能批量下">导出清单</button>
   </footer>
 </div>
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-card">
+    <div class="sheet-head">
+      <b>本地助手没在运行</b>
+      <button id="sheetClose" class="ghost">关闭</button>
+    </div>
+    <p class="sheet-lead">浏览器不让插件启动电脑上的程序，所以「读时长和分辨率」「合并 M3U8」这两件事，得交给浏览器外面的一个小助手。</p>
+
+    <div class="step">
+      <span class="n">1</span>
+      <div class="step-body">
+        <div class="t">打开「终端」</div>
+        <div class="d">按 <kbd>⌘</kbd> + <kbd>空格</kbd>，输入「终端」或 Terminal，回车。</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="n">2</span>
+      <div class="step-body">
+        <div class="t">粘这条命令，回车</div>
+        <pre id="sheetCmd">cd "/Volumes/TUF ESD-T1A Media/视频下载器/helper" &amp;&amp; ./start.sh</pre>
+        <button id="sheetCopy" class="mini">复制命令</button>
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="n">3</span>
+      <div class="step-body">
+        <div class="t">终端出现这几行，就是成功了</div>
+        <pre class="out">视频下载器助手已启动 http://127.0.0.1:8765
+  ffmpeg : /opt/homebrew/bin/ffmpeg
+  ffprobe: /opt/homebrew/bin/ffprobe</pre>
+        <div class="d">那个终端窗口留着别关——关掉助手就停了。</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="n">4</span>
+      <div class="step-body">
+        <div class="t">回来点下面的「重新检测」</div>
+        <div id="sheetState" class="d"></div>
+      </div>
+    </div>
+
+    <div class="sheet-acts">
+      <button id="sheetRecheck" class="primary">重新检测</button>
+      <button id="sheetCopy2" class="ghost">再复制一次命令</button>
+    </div>
+  </div>
+</div>
 <div id="toast" class="toast" hidden></div>
 <script type="module" src="popup.js"></script>
 </body>

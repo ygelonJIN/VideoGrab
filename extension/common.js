@@ -318,6 +318,12 @@ export async function helperCall(settings, path, init = {}, timeoutMs = 20000) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `助手 HTTP ${res.status}`);
     return data;
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error('助手响应超时');
+    if (String(e?.message || '').includes('fetch')) {
+      throw new Error('助手没在运行（127.0.0.1:8765 连不上）');
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
   }

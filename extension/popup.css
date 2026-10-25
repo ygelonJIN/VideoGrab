@@ -211,3 +211,63 @@ footer .hint { margin-right: auto; }
 }
 .toast[hidden] { display: none; }
 .toast.err { background: rgba(190, 30, 30, .95); }
+
+/* ---------------------------------------------------------- 助手引导 */
+.sheet {
+  position: fixed; inset: 0; z-index: 20;
+  background: rgba(17, 24, 39, .45);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.sheet[hidden] { display: none; }
+
+.sheet-card {
+  width: 100%; max-width: 100%; min-width: 0;
+  max-height: 92vh; overflow-y: auto; overflow-x: hidden;
+  background: var(--bg);
+  border-radius: 14px 14px 0 0;
+  padding: 14px 16px 16px;
+  box-shadow: 0 -8px 30px rgba(0,0,0,.25);
+}
+
+.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.sheet-head b {
+  font-size: 14px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.sheet-lead {
+  margin: 8px 0 14px; font-size: 12px; line-height: 1.65; color: var(--muted);
+}
+
+.step { display: flex; gap: 10px; margin-bottom: 12px; }
+.step .n {
+  flex: none; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--blue); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
+  margin-top: 1px;
+}
+.step-body { flex: 1; min-width: 0; }
+.step .t { font-size: 12.5px; font-weight: 600; margin-bottom: 3px; }
+.step .d { font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-top: 4px; }
+.step .d.ok { color: var(--green); }
+.step .d.err { color: var(--red); }
+
+.step pre {
+  margin: 5px 0 6px; overflow-x: hidden;
+  padding: 8px 9px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: 11px/1.55 "SF Mono", ui-monospace, Menlo, monospace;
+  color: var(--fg);
+  white-space: pre-wrap; word-break: break-all;
+}
+.step pre.out { color: var(--muted); font-size: 10.5px; }
+
+.sheet-acts { display: flex; gap: 8px; margin-top: 4px; }
+
+kbd {
+  font: 10.5px "SF Mono", ui-monospace, Menlo, monospace;
+  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+  padding: 0 3px; background: var(--soft);
+}

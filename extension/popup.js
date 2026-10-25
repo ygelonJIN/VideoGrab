@@ -195,7 +195,10 @@ function detailEl(item) {
     head = `<div class="facts">${facts.length ? facts.map(esc).join('<i>·</i>') : ''}</div>
       <div class="hintline err">${esc(String(d.err).slice(0, 120))}</div>
       <div class="hintline">${errHint(d.err)}</div>
-      <div class="acts"><button class="mini" data-act="diagcmd">复制诊断命令</button></div>`;
+      <div class="acts">
+        ${/助手/.test(String(d.err)) ? '<button class="mini" data-act="helpsheet">怎么启动助手</button>' : ''}
+        <button class="mini" data-act="diagcmd">复制诊断命令</button>
+      </div>`;
   } else if (d.loading && !facts.length && !streamFacts.length) {
     head = '<div class="facts dim">读取文件信息…</div>';
   } else {
@@ -319,7 +322,7 @@ async function actHelper(item) {
     kind: item.kind, url: item.url, name: item.name, headers: item.headers
   });
   if (!r?.ok) {
-    toast('助手没启动，先跑：' + HELPER_CMD, true);
+    openHelperSheet();
     return;
   }
   toast('已交给助手，去「任务」看进度');
@@ -477,6 +480,12 @@ function bindEvents() {
     toast('已导出；终端跑 aria2c -i 这个文件就能批量下');
   });
 
+  $('#sheetClose').addEventListener('click', closeHelperSheet);
+  $('#sheet').addEventListener('click', (e) => { if (e.target.id === 'sheet') closeHelperSheet(); });
+  $('#sheetCopy').addEventListener('click', () => actCopy(HELPER_CMD, '启动命令'));
+  $('#sheetCopy2').addEventListener('click', () => actCopy(HELPER_CMD, '启动命令'));
+  $('#sheetRecheck').addEventListener('click', recheckHelper);
+
   $('#list').addEventListener('click', onListClick);
   $('#jobList').addEventListener('click', onJobClick);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.close(); });
@@ -514,6 +523,7 @@ async function onListClick(e) {
     if (btn.tagName === 'A') e.preventDefault();
     if (act === 'copy') return actCopy(item.url);
     if (act === 'diagcmd') return actCopy(diagCommand(item), '诊断命令');
+    if (act === 'helpsheet') return openHelperSheet();
     if (act === 'aria2') return actAria2([item]);
     if (act === 'browser') return actBrowser(item);
     if (act === 'helper') return actHelper(item);
@@ -571,6 +581,35 @@ function switchPane(pane) {
   $('#tabSniff').classList.toggle('active', pane === 'sniff');
   $('#tabJobs').classList.toggle('active', pane === 'jobs');
   if (pane === 'jobs') refreshJobs();
+}
+
+function openHelperSheet() {
+  const el = $('#sheet');
+  if (!el) return;
+  $('#sheetState').textContent = '';
+  $('#sheetState').className = 'd';
+  el.hidden = false;
+}
+
+function closeHelperSheet() {
+  const el = $('#sheet');
+  if (el) el.hidden = true;
+}
+
+async function recheckHelper() {
+  const st = $('#sheetState');
+  st.textContent = '检测中…';
+  st.className = 'd';
+  const r = await send('diag');
+  if (r?.ok && r.helper) {
+    st.textContent = '✅ 连上了，关掉这个提示就能用';
+    st.className = 'd ok';
+    state.helperOk = true;
+  } else {
+    st.textContent = '还是连不上：确认那个终端窗口还开着、命令没报错';
+    st.className = 'd err';
+    state.helperOk = false;
+  }
 }
 
 let toastTimer = null;
