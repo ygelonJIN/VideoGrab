@@ -551,12 +551,26 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.log(`端口 ${PORT} 已被占用 —— 助手多半已经在运行了，不用再启动。`);
+    console.log(`想看它状态：curl -s http://127.0.0.1:${PORT}/api/health`);
+    console.log(`想重启它  ：lsof -ti :${PORT} | xargs kill; ./start.sh`);
+    process.exit(0);
+  }
+  console.error(e);
+  process.exit(1);
+});
+
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`视频下载器助手已启动 http://127.0.0.1:${PORT}`);
   console.log(`  ffmpeg : ${FFMPEG || '未安装（M3U8 合并不可用）'}`);
   console.log(`  ffprobe: ${FFPROBE || '未安装（预览元信息不可用）'}`);
   console.log(`  aria2c : ${ARIA2C || '未安装（自动退回 curl 单连接）'}`);
   console.log(`  输出目录: ${DEFAULT_OUT}`);
+  console.log('');
+  console.log(`  自检：curl -s http://127.0.0.1:${PORT}/api/health`);
+  console.log(`  这个窗口别关，关了就停了（想常驻见 README 的 launchd 一段）`);
 });
 
 process.on('SIGINT', () => {
