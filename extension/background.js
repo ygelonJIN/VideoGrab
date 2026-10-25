@@ -24,6 +24,23 @@ async function getSettings() {
   return settings;
 }
 
+let proxyCache = { at: 0, value: '', info: null };
+async function resolveProxy(force = false) {
+  const s = await getSettings();
+  if (s.proxyMode === 'off') return '';
+  if (s.proxyMode === 'manual') return s.proxy || '';
+  // auto：问助手系统代理开没开
+  if (!force && Date.now() - proxyCache.at < 20000) return proxyCache.value;
+  try {
+    const r = await helperCall(s, '/api/proxy', {}, 4000);
+    proxyCache = { at: Date.now(), value: r.enabled ? (r.proxy || '') : '', info: r };
+    return proxyCache.value;
+  } catch {
+    proxyCache = { at: Date.now(), value: s.proxy || '', info: { enabled: !!s.proxy, proxy: s.proxy || '', source: 'fallback' } };
+    return proxyCache.value;
+  }
+}
+
 // ---------------------------------------------------------------- 状态读写
 async function getTabMap(tabId) {
   if (tabItems.has(tabId)) return tabItems.get(tabId);
@@ -237,7 +254,7 @@ async function handle(msg) {
       return {};
     }
     case 'dl:aria2': {
-      const s = await getSettings();
+      const s = { ...(await getSettings()), proxy: await resolveProxy() };
       const gids = [];
       const errors = [];
       for (const raw of msg.items) {
@@ -279,7 +296,7 @@ async function handle(msg) {
       const s = await getSettings();
       const r = await helperCall(s, '/api/probe', {
         method: 'POST',
-        body: JSON.stringify({ url: msg.item.url, headers: msg.item.headers || {}, proxy: s.proxy || '' })
+        body: JSON.stringify({ url: msg.item.url, headers: msg.item.headers || {}, proxy: await resolveProxy() })
       }, 150000);
       if (r && r.ok === false) {
         const msg = String(r.error || '');
@@ -299,7 +316,7 @@ async function handle(msg) {
       try {
         const r = await helperCall(s, '/api/parse', {
           method: 'POST',
-          body: JSON.stringify({ url: item.url, headers: item.headers || {}, proxy: s.proxy || '' })
+          body: JSON.stringify({ url: item.url, headers: item.headers || {}, proxy: await resolveProxy() })
         }, 25000);
         text = r.text;
         via = 'helper';
@@ -351,7 +368,7 @@ async function handle(msg) {
         name: msg.name,
         headers: msg.headers || {},
         outDir: s.outputDir || '',
-        proxy: s.proxy || ''
+        proxy: await resolveProxy()
       };
       const r = await helperCall(s, '/api/jobs', { method: 'POST', body: JSON.stringify(body) }, 15000);
       return { job: r };
@@ -361,6 +378,11 @@ async function handle(msg) {
     case 'helper:cancel': {
       await helperCall(settings, `/api/jobs/${encodeURIComponent(msg.id)}/cancel`, { method: 'POST' }, 6000);
       return {};
+    }
+    case 'proxy:detect': {
+      proxyCache = { at: 0, value: '', info: null };
+      const proxy = await resolveProxy(true);
+      return { proxy, info: proxyCache.info || null };
     }
     case 'cfg:get':
       return { settings: await getSettings() };

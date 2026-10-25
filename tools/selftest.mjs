@@ -23,6 +23,7 @@ function check(name, cond, detail = '') {
 // ---------------------------------------------------------------- 1. common.js
 const C = await import(path.join(EXT, 'common.js'));
 
+check('默认代理模式是自动', C.DEFAULT_SETTINGS.proxyMode === 'auto', String(C.DEFAULT_SETTINGS.proxyMode));
 check('classify mp4', C.classify('https://a.com/v/x.mp4', 'video/mp4') === 'MP4');
 check('classify m3u8 by ext', C.classify('https://a.com/v/index.m3u8', 'text/plain') === 'HLS');
 check('classify m3u8 by type', C.classify('https://a.com/v/play', 'application/vnd.apple.mpegurl') === 'HLS');

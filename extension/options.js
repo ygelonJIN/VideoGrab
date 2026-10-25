@@ -18,6 +18,9 @@ async function load() {
     if (el.type === 'checkbox') el.checked = !!s[k];
     else el.value = s[k] ?? '';
   }
+  const mode = s.proxyMode || 'auto';
+  for (const r of document.querySelectorAll('input[name="proxyMode"]')) r.checked = r.value === mode;
+  syncProxyInput(mode);
   $('aria2Cmd').textContent = aria2Command(s);
   $('helperCmd').textContent = helperCommand();
 }
@@ -31,6 +34,14 @@ function helperCommand() {
   return 'node "$HOME/视频下载器/helper/server.mjs"\n# 或者：cd 视频下载器/helper && ./start.sh';
 }
 
+function syncProxyInput(mode) {
+  const input = $('proxy');
+  if (!input) return;
+  const manual = mode === 'manual';
+  input.disabled = !manual;
+  input.parentElement.style.opacity = manual ? '1' : '.5';
+}
+
 function collect() {
   const out = {};
   for (const k of FIELDS) {
@@ -40,6 +51,8 @@ function collect() {
     else if (el.type === 'number') out[k] = Number(el.value) || 0;
     else out[k] = el.value.trim();
   }
+  const mode = document.querySelector('input[name="proxyMode"]:checked');
+  out.proxyMode = mode ? mode.value : 'auto';
   return out;
 }
 
@@ -100,6 +113,23 @@ $('reset').addEventListener('click', async () => {
   await load();
   $('saveState').textContent = '已恢复默认';
   $('saveState').className = 'state ok';
+});
+document.querySelectorAll('input[name="proxyMode"]').forEach((r) => {
+  r.addEventListener('change', () => syncProxyInput(r.value));
+});
+$('testProxy').addEventListener('click', async () => {
+  const el = $('proxyState');
+  el.textContent = '检测中…';
+  el.className = 'state';
+  const r = await send('proxy:detect');
+  const info = r?.info || {};
+  if (r?.ok && r.proxy) {
+    el.textContent = `系统代理开着，会走 ${r.proxy}（${info.source || ''}）`;
+    el.className = 'state ok';
+  } else {
+    el.textContent = info.note || '系统代理关着，会直连';
+    el.className = 'state';
+  }
 });
 $('testAria2').addEventListener('click', () => test('aria2'));
 $('testHelper').addEventListener('click', () => test('helper'));

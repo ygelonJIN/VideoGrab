@@ -65,10 +65,17 @@
   <section class="card">
     <h2>网络代理</h2>
     <div class="grid">
+      <label class="switch"><input type="radio" name="proxyMode" value="auto"><span>自动跟随系统（推荐）</span></label>
+      <label class="switch"><input type="radio" name="proxyMode" value="off"><span>永远不用代理</span></label>
+      <label class="switch"><input type="radio" name="proxyMode" value="manual"><span>手动指定</span></label>
       <label class="wide">代理地址
-        <input id="proxy" placeholder="http://127.0.0.1:7897（留空 = 直连）">
-        <small>有的站签名链接绑 IP：浏览器走代理拿到的链接，aria2 / ffmpeg 也必须走同一个代理，否则 403</small>
+        <input id="proxy" placeholder="http://127.0.0.1:7897">
+        <small>「自动」= 读本机系统代理：你开了代理就走代理，关了就直接连。有的站签名链接绑出口 IP，下载必须和浏览器走同一条路。</small>
       </label>
+    </div>
+    <div class="row-actions">
+      <button id="testProxy" class="ghost">检测当前系统代理</button>
+      <span id="proxyState" class="state"></span>
     </div>
   </section>
 

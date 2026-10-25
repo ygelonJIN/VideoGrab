@@ -13,6 +13,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 
 const PORT = Number(process.env.VG_PORT || 8765);
@@ -21,6 +22,33 @@ const DEFAULT_OUT = path.join(HOME, 'Desktop');
 const VERSION = '1.0.0';
 const CONCURRENCY = Number(process.env.VG_CONCURRENCY || 2);
 const MAX_JOBS = 60;
+
+// 读 macOS 系统代理设置，再确认端口真的在听
+function detectSystemProxy() {
+  let host = '', port = 0, enabled = false, source = 'none';
+  try {
+    const out = spawnSync('scutil', ['--proxy'], { encoding: 'utf8', timeout: 3000 }).stdout || '';
+    const pick = (re) => { const m = re.exec(out); return m ? m[1].trim() : ''; };
+    if (pick(/HTTPEnable\s*:\s*(\d)/) === '1') {
+      host = pick(/HTTPProxy\s*:\s*(\S+)/);
+      port = Number(pick(/HTTPPort\s*:\s*(\d+)/));
+      if (host && port) { enabled = true; source = 'system-http'; }
+    }
+    if (!enabled && pick(/HTTPSEnable\s*:\s*(\d)/) === '1') {
+      host = pick(/HTTPSProxy\s*:\s*(\S+)/);
+      port = Number(pick(/HTTPSPort\s*:\s*(\d+)/));
+      if (host && port) { enabled = true; source = 'system-https'; }
+    }
+  } catch { /* 忽略 */ }
+
+  if (!enabled) return { enabled: false, proxy: '', source };
+
+  const alive = spawnSync('nc', ['-z', '-G', '1', host, String(port)], { timeout: 2500 });
+  if (alive.status !== 0) {
+    return { enabled: false, proxy: '', source: source + '-dead', note: `系统代理指向 ${host}:${port}，但端口没在听` };
+  }
+  return { enabled: true, proxy: `http://${host}:${port}`, source };
+}
 
 const jobs = new Map();      // id -> job
 const queue = [];
@@ -566,6 +594,10 @@ const server = http.createServer(async (req, res) => {
         aria2c: Boolean(ARIA2C), aria2cPath: ARIA2C,
         curl: Boolean(CURL), concurrency: CONCURRENCY
       });
+    }
+
+    if (p === '/api/proxy' && req.method === 'GET') {
+      return json(res, 200, detectSystemProxy());
     }
 
     if (p === '/api/parse' && req.method === 'POST') {
