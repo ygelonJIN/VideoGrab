@@ -150,6 +150,12 @@ export async function aria2Call(settings, method, params = [], timeoutMs = 8000)
     const data = await res.json();
     if (data.error) throw new Error(data.error.message || 'aria2 返回错误');
     return data.result;
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error('aria2 超时没响应');
+    if (String(e?.message || '').includes('fetch')) {
+      throw new Error('aria2 没在跑（127.0.0.1:6800 连不上）');
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
   }

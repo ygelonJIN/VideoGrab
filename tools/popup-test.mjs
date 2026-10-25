@@ -101,7 +101,11 @@ const { window } = dom;
 const { document } = window;
 
 window.chrome = makeChrome();
-document.execCommand = () => true;
+document.execCommand = () => {          // 模拟 execCommand 复制
+  const ta = document.querySelector('textarea');
+  if (ta) clipboard.push(ta.value);
+  return true;
+};
 Object.defineProperty(window.navigator, 'clipboard', {
   value: { writeText: async (t) => { clipboard.push(t); } },
   configurable: true

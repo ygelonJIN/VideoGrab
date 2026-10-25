@@ -281,7 +281,13 @@ async function handle(msg) {
         method: 'POST',
         body: JSON.stringify({ url: msg.item.url, headers: msg.item.headers || {}, proxy: s.proxy || '' })
       }, 150000);
-      if (r && r.ok === false) throw new Error(r.error || '预览失败');
+      if (r && r.ok === false) {
+        const msg = String(r.error || '');
+        if (/40[13]/.test(msg) && !s.proxy) {
+          throw new Error('直连被拒（403）。这个站多半绑定出口 IP：去「设置 → 网络代理」填 http://127.0.0.1:7897');
+        }
+        throw new Error(msg || '预览失败');
+      }
       if (!r || !r.media) throw new Error('助手没有返回预览数据');
       return { media: r.media };
     }

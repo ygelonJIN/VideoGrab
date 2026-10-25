@@ -294,17 +294,24 @@ async function actBrowser(item) {
 
 async function actCopy(text, label = '链接') {
   if (!text) return toast('没有内容可复制', true);
+  // 弹窗里 execCommand 最可靠；clipboard API 有时 resolve 了但没写进去
+  let ok = false;
   try {
-    await navigator.clipboard.writeText(text);
-  } catch {
     const ta = document.createElement('textarea');
     ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.setAttribute('readonly', '');
     document.body.appendChild(ta);
     ta.select();
-    document.execCommand('copy');
+    ta.setSelectionRange(0, ta.value.length);
+    ok = document.execCommand('copy');
     ta.remove();
+  } catch { ok = false; }
+  if (!ok) {
+    try { await navigator.clipboard.writeText(text); ok = true; } catch { ok = false; }
   }
-  toast(`已复制${label}`);
+  toast(ok ? `已复制${label}` : '复制失败：请手动选中文本', !ok);
 }
 
 async function actHelper(item) {
