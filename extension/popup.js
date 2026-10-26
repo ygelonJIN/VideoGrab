@@ -640,15 +640,21 @@ async function scanPage() {
       updateHelperUI();
     }
 
-    const groups = (r.scan?.listing || []).filter((g) => g.items?.length);
+    const listing = r.scan?.listing || [];
+    // 3 条以上才算一组：老版助手会把单条链接也塞进 listing，不设下限会“认出”一堆垃圾
+    const groups = listing.filter((g) => (g.items?.length || 0) >= 3);
     state.batchGroups = groups;
     if (!groups.length) {
       state.batchItems = [];
       renderBatch();
-      $('#batchHint').textContent = '';
+      const maxG = listing.reduce((m, g) => Math.max(m, g.items?.length || 0), 0);
+      const stats = `读到 ${r.linkCount || 0} 条链接，最多的一组只有 ${maxG} 条（3 条以上才算一组）`;
+      $('#batchHint').textContent = r.helperDown
+        ? `助手没开，${stats}。启动助手后能扫得更全`
+        : `${stats}。滚到底等卡片都出来，再点「扫描本页」`;
       toast(r.helperDown
-        ? '助手没开，页面链接也没认出条目列表：启动助手后扫得更全'
-        : '这一页没认出条目列表：换个列表页，或先在页面里滚到底再扫', true);
+        ? `助手没开，${stats}：启动助手后能扫得更全`
+        : `这一页没认出条目列表：${stats}`, true);
       return;
     }
 

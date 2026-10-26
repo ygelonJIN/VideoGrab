@@ -215,8 +215,83 @@ export function pathTemplate(href) {
   } catch { return s; }
   return s
     .replace(/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '/:id')
-    .replace(/\/\d{3,}/g, '/:id')
+    .replace(/\/\d{2,}/g, '/:id')
     .replace(/\/[0-9a-f]{16,}/gi, '/:id');
+}
+
+/** 导航 / 静态资源 / 翻页排序链接，进条目列表全是噪音 */
+function isNoiseLink(url) {
+  let path = '';
+  let search = '';
+  try {
+    const u = new URL(url);
+    path = u.pathname;
+    search = u.search;
+  } catch { return true; }
+  const last = path.split('/').filter(Boolean).pop() || '';
+  if (NAV_HINT.test(path)) return true;
+  if (/\.[a-z0-9]{2,5}$/i.test(last)) return true;
+  if (/[?&](?:page|p|offset|sort|order)=/i.test(search)) return true;
+  return false;
+}
+
+/** 条目所属的父目录；根目录返回空（导航链接全挤在根上，兜底会认错） */
+function dirOf(url) {
+  try {
+    const u = new URL(url);
+    const segs = u.pathname.split('/').filter(Boolean);
+    if (segs.length < 2) return '';
+    return u.host + '/' + segs.slice(0, -1).join('/');
+  } catch { return ''; }
+}
+
+/**
+ * 链接分组认条目，两级规则（和扩展 common.js 的 groupListing 保持一致，selftest 对照）：
+ *   1. 模板组：路径结构重复 >= 3 次（数字 id / uuid 型）
+ *   2. 目录兜底：模板组没认领的链接里，同一父目录下的不同子路径 >= 3 条也算（slug / 标题型）
+ * links 元素可以是字符串或 {url, label}。
+ */
+export function groupDomLinks(links) {
+  const items = [];
+  const seen = new Set();
+  for (const raw of links || []) {
+    const it = typeof raw === 'string' ? { url: raw, label: '' } : (raw || {});
+    const url = String(it.url || '');
+    if (!url || seen.has(url) || isNoiseLink(url)) continue;
+    seen.add(url);
+    items.push({ url, label: String(it.label || '').replace(/\s+/g, ' ').trim().slice(0, 80) });
+  }
+  const pick = (i) => ({ url: i.url, label: i.label });
+
+  // 1) 模板组
+  const byTemplate = new Map();
+  for (const it of items) {
+    const t = pathTemplate(it.url);
+    if (!byTemplate.has(t)) byTemplate.set(t, []);
+    byTemplate.get(t).push(it);
+  }
+  const templateGroups = [...byTemplate.entries()]
+    .filter(([, list]) => list.length >= 3)
+    .map(([template, list]) => ({ template, count: list.length, items: list.map(pick) }));
+
+  // 2) 目录兜底（只收模板组没认领的链接，避免同一批条目出两组）
+  const claimed = new Set(templateGroups.flatMap((g) => g.items.map((i) => i.url)));
+  const byDir = new Map();
+  for (const it of items) {
+    if (claimed.has(it.url)) continue;
+    const d = dirOf(it.url);
+    if (!d) continue;
+    if (!byDir.has(d)) byDir.set(d, []);
+    byDir.get(d).push(it);
+  }
+  const dirGroups = [...byDir.entries()]
+    .filter(([, list]) => list.length >= 3)
+    .map(([dir, list]) => ({ template: dir + '/*', count: list.length, items: list.map(pick) }));
+
+  return [
+    ...templateGroups.sort((a, b) => b.count - a.count),
+    ...dirGroups.sort((a, b) => b.count - a.count)
+  ];
 }
 
 function stripTags(s) {
@@ -282,20 +357,8 @@ export function discover(html, baseUrl) {
 
   const links = discoverLinks(raw, baseUrl).filter((l) => !NAV_HINT.test(new URL(l.url).pathname));
 
-  // 模板重复 >= 3 次 = 条目列表
-  const groups = new Map();
-  for (const l of links) {
-    if (!groups.has(l.template)) groups.set(l.template, []);
-    groups.get(l.template).push(l);
-  }
-  const listing = [...groups.entries()]
-    .filter(([, items]) => items.length >= 3)
-    .map(([template, items]) => ({
-      template,
-      count: items.length,
-      items: items.map((i) => ({ url: i.url, label: i.label }))
-    }))
-    .sort((a, b) => b.count - a.count);
+  // 条目分组统一走 groupDomLinks：模板组 + 目录兜底
+  const listing = groupDomLinks(links);
 
   return { title: cleanTitle, media: mediaClean, embeds: discoverEmbeds(raw, baseUrl), links, listing };
 }

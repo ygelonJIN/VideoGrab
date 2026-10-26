@@ -336,13 +336,24 @@ async function handle(msg) {
       const s = await getSettings();
       let links = [];
       try {
+        // allFrames：列表可能整个嵌在 iframe 里，只读顶帧会一无所获
         const probe = await chrome.scripting.executeScript({
-          target: { tabId: msg.tabId },
+          target: { tabId: msg.tabId, allFrames: true },
           func: collectPageLinks
         });
-        const raw = Array.isArray(probe?.[0]?.result) ? probe[0].result : [];
-        // 注入函数返回 {url,label}；老的测试桩可能只给字符串，两种都收
-        links = raw.map((x) => (typeof x === 'string' ? { url: x, label: '' } : x)).filter((x) => x?.url);
+        const byUrl = new Map();
+        for (const frame of (Array.isArray(probe) ? probe : [])) {
+          for (const x of (frame?.result || [])) {
+            // 注入函数返回 {url,label}；老的测试桩可能只给字符串，两种都收
+            const it = typeof x === 'string' ? { url: x, label: '' } : x;
+            if (!it?.url) continue;
+            const prev = byUrl.get(it.url);
+            if (!prev || String(it.label || '').length > String(prev.label || '').length) {
+              byUrl.set(it.url, it);
+            }
+          }
+        }
+        links = [...byUrl.values()];
       } catch (e) {
         throw new Error('读不到这个页面的内容：' + (e?.message || e));
       }
@@ -354,11 +365,17 @@ async function handle(msg) {
           method: 'POST',
           body: JSON.stringify({
             url: msg.pageUrl || '',
-            links,
+            // 传纯字符串：老版助手按 /^https?:/ 过滤，传 {url,label} 对象会被整批丢掉
+            links: links.map((l) => l.url),
             headers: { ua: s.userAgent },
             proxy: await resolveProxy()
           })
         }, 60000);
+        // 标签回填：助手的 dom 分支只有 URL，标签在扩展这边
+        const labelOf = new Map(links.map((l) => [l.url, l.label]));
+        for (const g of (scan?.listing || [])) {
+          for (const it of (g.items || [])) if (!it.label) it.label = labelOf.get(it.url) || '';
+        }
       } catch (e) {
         helperDown = true;
         const listing = groupListing(links);

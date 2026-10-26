@@ -105,6 +105,24 @@ check('groupListing 保留标签', listing[0]?.items?.[0]?.label === '第 101 �
 check('groupListing 排除导航页', !listing[0].items.some((i) => i.url.includes('/about')));
 check('groupListing 不足 3 条不算列表', C.groupListing(['https://site.com/a/111', 'https://site.com/a/222']).length === 0);
 check('groupListing 兼容纯字符串', C.groupListing([1, 2, 3].map((n) => `https://site.com/p/${n}00`)).length === 1);
+check('groupListing 短数字 id 也认', C.groupListing(['https://site.com/v/12', 'https://site.com/v/13', 'https://site.com/v/14'])
+  .some((g) => g.template === 'site.com/v/:id'));
+check('groupListing slug 目录兜底', (() => {
+  const g = C.groupListing(['https://site.com/videos/ep-one', 'https://site.com/videos/ep-two', 'https://site.com/videos/ep-three']);
+  return g.length === 1 && g[0].template === 'site.com/videos/*' && g[0].count === 3;
+})());
+check('groupListing 根目录不兜底（导航全挤在根上）',
+  C.groupListing(['https://site.com/alpha', 'https://site.com/bravo', 'https://site.com/charlie']).length === 0);
+check('groupListing 过滤静态资源',
+  C.groupListing(['https://site.com/assets/a.css', 'https://site.com/assets/b.png', 'https://site.com/assets/c.js']).length === 0);
+check('groupListing 过滤翻页链接',
+  C.groupListing(['https://site.com/videos/x?page=2', 'https://site.com/videos/y?page=3', 'https://site.com/videos/z?page=4']).length === 0);
+check('groupListing 与助手实现结果一致', (() => {
+  const sample = [...links,
+    { url: 'https://site.com/videos/ep-one' }, { url: 'https://site.com/videos/ep-two' }, { url: 'https://site.com/videos/ep-three' },
+    'https://site.com/v/12', 'https://site.com/v/13', 'https://site.com/v/14'];
+  return JSON.stringify(C.groupListing(sample)) === JSON.stringify(E.groupDomLinks(sample));
+})());
 check('isHelperDown 认出连不上', C.isHelperDown('助手没在运行（127.0.0.1:8765 连不上）'));
 check('isHelperDown 不误判旧版本', !C.isHelperDown('助手还是旧版本，没有这个接口：重启一下助手再试'));
 
@@ -144,6 +162,8 @@ globalThis.chrome = {
 };
 
 let rpcBodies = [];
+let scanBodies = [];
+let scanOnline = false;   // true = /api/scan 返回真 JSON（助手在线）；false = 没有 json()，helperCall 会抛
 globalThis.fetch = async (url, init) => {
   if (String(url).includes('6800')) {
     rpcBodies.push(JSON.parse(init.body));
@@ -151,6 +171,25 @@ globalThis.fetch = async (url, init) => {
   }
   if (String(url).includes('/api/probe')) {
     return { ok: true, status: 200, json: async () => ({ ok: true, media: { duration: 42, width: 1280, height: 720, thumbnail: 'data:image/jpeg;base64,xxxx' } }) };
+  }
+  if (String(url).includes('/api/scan')) {
+    scanBodies.push(JSON.parse(init.body));
+    if (!scanOnline) return { ok: true, status: 200, text: async () => '' };
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        ok: true, source: 'dom', title: '',
+        listing: [{
+          template: 'site.com/watch/:id', count: 3,
+          items: [
+            { url: 'https://site.com/watch/101', label: '' },
+            { url: 'https://site.com/watch/102', label: '' },
+            { url: 'https://site.com/watch/103', label: '' }
+          ]
+        }],
+        total: 3
+      })
+    };
   }
   return { ok: true, text: async () => media, status: 200 };
 };
@@ -233,6 +272,16 @@ check('batch:scan 助手不通走本地分组', res.ok && res.helperDown === tru
   JSON.stringify(res).slice(0, 160));
 check('本地分组认出 3 条', res.scan?.listing?.[0]?.items?.length === 3);
 check('本地分组保留标签', res.scan?.listing?.[0]?.items?.[0]?.label === '第 101 集');
+
+// 助手在线链路：发给 /api/scan 的必须是纯字符串（对象会被老版助手按 /^https?:/ 整批丢掉）
+scanOnline = true;
+res = await send({ type: 'batch:scan', tabId: 7, pageUrl: 'https://site.com/list' });
+const sentLinks = scanBodies.at(-1)?.links || [];
+check('batch:scan 发给助手的是纯字符串', sentLinks.length === 3 && sentLinks.every((x) => typeof x === 'string'),
+  JSON.stringify(sentLinks).slice(0, 120));
+check('助手在线不误标本地兜底', res.ok && res.helperDown === false);
+check('助手结果回填标签', res.scan?.listing?.[0]?.items?.[0]?.label === '第 101 集',
+  JSON.stringify(res.scan?.listing?.[0]?.items?.[0]));
 
 // ---------------------------------------------------------------- 3. id 交叉检查
 function idsIn(file) {

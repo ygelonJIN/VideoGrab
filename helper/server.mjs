@@ -15,7 +15,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { discover, looksGone, pathTemplate } from './extract.mjs';
+import { discover, looksGone, groupDomLinks } from './extract.mjs';
 import { extractAria2Error, describeExit } from './errors.mjs';
 import { uniqueName, splitExt } from './naming.mjs';
 
@@ -885,8 +885,11 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const proxy = body.proxy || '';
       const headers = body.headers || {};
+      // links 元素可以是字符串或 {url,label}：以前只收字符串，扩展一改成对象就被整批丢掉
       const domLinks = Array.isArray(body.links)
-        ? [...new Set(body.links.filter((x) => /^https?:/i.test(String(x))))]
+        ? body.links
+            .map((x) => (typeof x === 'string' ? { url: x, label: '' } : x))
+            .filter((x) => x && /^https?:/i.test(String(x.url || '')))
         : [];
 
       let page = null;
@@ -900,18 +903,7 @@ const server = http.createServer(async (req, res) => {
       let listing = found.listing;
       let source = listing.length ? 'html' : '';
       if (domLinks.length) {
-        const groups = new Map();
-        for (const u of domLinks) {
-          const t = pathTemplate(u);
-          if (!groups.has(t)) groups.set(t, []);
-          groups.get(t).push(u);
-        }
-        listing = [...groups.entries()]
-          .map(([template, urls]) => ({
-            template, count: urls.length,
-            items: urls.map((u) => ({ url: u, label: '' }))
-          }))
-          .sort((a, b) => b.count - a.count);
+        listing = groupDomLinks(domLinks);
         source = 'dom';
       }
 
