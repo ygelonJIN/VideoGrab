@@ -85,6 +85,29 @@ for (const frag of ['-extension_picky 0', '-allowed_extensions ALL', '-allowed_s
   check('ffmpeg 命令片段 ' + frag.slice(0, 24), cmd.includes(frag));
 }
 
+// 批量兜底：本地分组的模板规则必须和助手里的发现器一致
+const E = await import(path.join(ROOT, 'helper', 'extract.mjs'));
+const sampleUrls = [
+  'https://site.com/watch/123', 'https://site.com/watch/45678',
+  'https://site.com/v/11111111-2222-3333-4444-555555555555',
+  'https://site.com/clip/abcdef0123456789abcdef0'
+];
+check('pathTemplate 与助手实现一致', sampleUrls.every((u) => C.pathTemplate(u) === E.pathTemplate(u)),
+  sampleUrls.map((u) => C.pathTemplate(u) + ' / ' + E.pathTemplate(u)).join(' | '));
+
+const links = [
+  ...[101, 102, 103, 104].map((n) => ({ url: `https://site.com/watch/${n}`, label: `第 ${n} 集` })),
+  { url: 'https://site.com/about', label: '关于' }
+];
+const listing = C.groupListing(links);
+check('groupListing 认出条目组', listing.length === 1 && listing[0].count === 4, JSON.stringify(listing).slice(0, 120));
+check('groupListing 保留标签', listing[0]?.items?.[0]?.label === '第 101 集');
+check('groupListing 排除导航页', !listing[0].items.some((i) => i.url.includes('/about')));
+check('groupListing 不足 3 条不算列表', C.groupListing(['https://site.com/a/111', 'https://site.com/a/222']).length === 0);
+check('groupListing 兼容纯字符串', C.groupListing([1, 2, 3].map((n) => `https://site.com/p/${n}00`)).length === 1);
+check('isHelperDown 认出连不上', C.isHelperDown('助手没在运行（127.0.0.1:8765 连不上）'));
+check('isHelperDown 不误判旧版本', !C.isHelperDown('助手还是旧版本，没有这个接口：重启一下助手再试'));
+
 // ---------------------------------------------------------------- 2. background.js（假 chrome）
 const store = { session: new Map(), local: new Map() };
 const mkStore = (m) => ({
@@ -110,7 +133,14 @@ globalThis.chrome = {
   storage: { session: mkStore(store.session), local: mkStore(store.local) },
   runtime: { onMessage: { addListener: (fn) => { L.msg = fn; } }, onInstalled: noop, openOptionsPage: () => {} },
   contextMenus: { removeAll: () => {}, create: () => {}, onClicked: noop },
-  downloads: { download: async () => 1 }
+  downloads: { download: async () => 1 },
+  scripting: {
+    executeScript: async () => [{ result: [
+      { url: 'https://site.com/watch/101', label: '第 101 集' },
+      { url: 'https://site.com/watch/102', label: '第 102 集' },
+      { url: 'https://site.com/watch/103', label: '第 103 集' }
+    ] }]
+  }
 };
 
 let rpcBodies = [];
@@ -196,6 +226,13 @@ req('r5', 'https://cdn.com/v/seg1.ts', 'video/mp2t', 300000);
 await new Promise((r) => setTimeout(r, 150));
 res = await send({ type: 'media:list', tabId: 7 });
 check('打开分片后能看到 TS', res.items.some((i) => i.kind === 'TS'));
+
+// 批量扫描：助手（/api/scan）不通时退回本地分组，条目照样列得出来
+res = await send({ type: 'batch:scan', tabId: 7, pageUrl: 'https://site.com/list' });
+check('batch:scan 助手不通走本地分组', res.ok && res.helperDown === true && res.scan?.listing?.length === 1,
+  JSON.stringify(res).slice(0, 160));
+check('本地分组认出 3 条', res.scan?.listing?.[0]?.items?.length === 3);
+check('本地分组保留标签', res.scan?.listing?.[0]?.items?.[0]?.label === '第 101 集');
 
 // ---------------------------------------------------------------- 3. id 交叉检查
 function idsIn(file) {

@@ -19,7 +19,7 @@ Chrome MV3 扩展 + 本地 Node 助手。嗅探页面媒体（MP4 / M3U8 / DASH 
 
 - `extension/` — Chrome 扩展：`background.js` 嗅探与调度，`popup.*` 面板（嗅探 / 任务 / 批量），`options.*` 设置
 - `helper/` — 本地助手：`server.mjs`、`extract.mjs`（通用媒体发现器，纯函数）、`start.sh`、launchd plist
-- `tools/` — `extract-test.mjs`（发现器，合成 HTML）、`selftest.mjs`（逻辑）、`popup-test.mjs`（渲染）、`cdp-test.mjs`（真浏览器，备用）
+- `tools/` — `extract-test.mjs`（发现器，合成 HTML）、`selftest.mjs`（逻辑）、`popup-test.mjs`（渲染）、`shot.mjs`（UI 截图，Chrome 无头）、`cdp-test.mjs`（真浏览器，备用）
 - `不推送/` — 私人文件，永不提交
 
 ## 经验索引

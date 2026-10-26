@@ -45,7 +45,10 @@ const ITEMS = [
 
 const clipboard = [];
 const sent = [];
+const downloads = [];
 let helperOnline = true;
+let scanExtra = false;   // 扫出 4 条（多一条 /4），用来测全选/半选和重试
+let resolve4Ok = false;  // /4 第一次解析失败，重试才成功
 
 function makeChrome() {
   return {
@@ -89,32 +92,42 @@ function makeChrome() {
           case 'cfg:get': return { ok: true, settings: {} };
           case 'batch:scan': return {
             ok: true,
+            helperDown: !helperOnline,
             scan: {
-              source: 'dom', title: '列表',
+              source: helperOnline ? 'dom' : 'local', title: '列表',
               listing: [{
-                template: 'site.com/watch/:id', count: 3,
-                items: [
-                  { url: 'https://site.com/watch/1', label: '' },
-                  { url: 'https://site.com/watch/2', label: '' },
-                  { url: 'https://site.com/watch/3', label: '' }
-                ]
+                template: 'site.com/watch/:id',
+                count: scanExtra ? 4 : 3,
+                items: (scanExtra ? [1, 2, 3, 4] : [1, 2, 3]).map((n) => (
+                  { url: `https://site.com/watch/${n}`, label: '' }
+                ))
               }],
-              total: 3
+              total: scanExtra ? 4 : 3
             }
           };
-          case 'batch:resolve': return {
-            ok: true,
-            items: (msg.urls || []).map((u) => (
-              u.endsWith('/1')
-                ? {
-                    url: u, ok: true, gone: false, title: 'A',
-                    media: { url: 'https://cdn/v/a.mp4', kind: 'MP4', size: 10485760, headers: { ua: 'UA' }, headerMode: 'no-referer' }
-                  }
-                : u.endsWith('/2')
-                  ? { url: u, ok: false, gone: false, unavailable: true, reason: '播放器里没有媒体配置' }
-                  : { url: u, ok: false, gone: true, reason: 'HTTP 404' }
-            ))
-          };
+          case 'batch:resolve': {
+            if (!helperOnline) return { ok: false, error: '助手没在运行（127.0.0.1:8765 连不上）' };
+            return {
+              ok: true,
+              items: (msg.urls || []).map((u) => (
+                u.endsWith('/1')
+                  ? {
+                      url: u, ok: true, gone: false, title: 'A',
+                      media: { url: 'https://cdn/v/a.mp4', kind: 'MP4', size: 10485760, headers: { ua: 'UA' }, headerMode: 'no-referer' }
+                    }
+                  : u.endsWith('/2')
+                    ? { url: u, ok: false, gone: false, unavailable: true, reason: '播放器里没有媒体配置' }
+                    : u.endsWith('/3')
+                      ? { url: u, ok: false, gone: true, reason: 'HTTP 404' }
+                      : u.endsWith('/4') && !resolve4Ok
+                        ? { url: u, ok: false, gone: false, reason: '解析超时' }
+                        : {
+                            url: u, ok: true, gone: false, title: 'D',
+                            media: { url: 'https://cdn/v/d.mp4', kind: 'MP4', size: 20971520, headers: { ua: 'UA' }, headerMode: 'no-referer' }
+                          }
+              ))
+            };
+          }
           case 'batch:history': return { ok: true, history: {} };
           case 'batch:submit': return { ok: true, jobs: [{ id: 'j1', name: 'A' }], errors: [], history: {} };
           default: return { ok: true };
@@ -138,7 +151,7 @@ function makeChrome() {
       get: async (id) => ({ id, url: 'https://site.com/list' })
     },
     scripting: { executeScript: async () => [{ result: ['https://site.com/watch/1'] }] },
-    downloads: { download: async () => 1 }
+    downloads: { download: async (opts) => { downloads.push(opts); return 1; } }
   };
 }
 
@@ -326,6 +339,72 @@ check('全选只勾中可下的那条', $('#batchSelInfo').textContent.includes(
 click($('#btnBatchDown'));
 await sleep(120);
 check('加入队列发出 batch:submit', sent.includes('batch:submit'));
+
+// 13. 勾选体验：全选 / 半选 / 手动改过就不再自动勾回
+scanExtra = true;                       // 扫出 4 条：/1 可下 /2 失效 /3 下架 /4 解析失败
+resolve4Ok = false;
+click($('#btnScan'));
+await sleep(700);
+let brows2 = $$('#batchList li.row');
+check('重新扫描出 4 条', brows2.length === 4, String(brows2.length));
+check('解析失败单独标出来', brows2[3].textContent.includes('解析失败'), brows2[3].textContent.slice(0, 60));
+check('按钮文案跟着剩余走', $('#btnResolve').textContent.includes('重试失败'), $('#btnResolve').textContent);
+check('可下自动勾上', brows2[0].querySelector('.bsel').checked === true);
+check('全选跟着打勾', $('#batchSelAll').checked === true);
+check('全选不是半选', $('#batchSelAll').indeterminate === false);
+
+let boxN = (n) => $$('#batchList li.row')[n].querySelector('.bsel');
+boxN(0).checked = false;
+boxN(0).dispatchEvent(new window.Event('change', { bubbles: true }));
+await sleep(40);
+check('取消单条后计数更新', $('#batchSelInfo').textContent.includes('已勾 0'), $('#batchSelInfo').textContent);
+check('取消单条后全选松开', $('#batchSelAll').checked === false);
+
+resolve4Ok = true;                      // 重试后 /4 变可下
+click($('#btnResolve'));
+await sleep(600);
+brows2 = $$('#batchList li.row');
+check('重试后失败变可下', brows2[3].textContent.includes('可下'), brows2[3].textContent.slice(0, 60));
+check('手动改过勾选不再自动勾回', boxN(3).checked === false);
+check('计数没被带跑', $('#batchSelInfo').textContent.includes('已勾 0'), $('#batchSelInfo').textContent);
+
+$('#batchSelAll').checked = true;
+$('#batchSelAll').dispatchEvent(new window.Event('change', { bubbles: true }));
+await sleep(40);
+check('全选能重新勾全', $('#batchSelInfo').textContent.includes('已勾 2'), $('#batchSelInfo').textContent);
+boxN(3).checked = false;
+boxN(3).dispatchEvent(new window.Event('change', { bubbles: true }));
+await sleep(40);
+check('取消一条进半选', $('#batchSelAll').indeterminate === true && $('#batchSelAll').checked === false);
+
+// 14. 助手没开：批量照样列得出条目，引导卡和弹层都在
+helperOnline = false;
+click($('#btnScan'));
+await sleep(700);
+check('没开助手也能扫出条目', $$('#batchList li.row').length === 4, String($$('#batchList li.row').length));
+check('没解析的保持待解析', $$('#batchList .chip.b-pending').length === 4,
+  $$('#batchList .chip.b-pending').length + ' 条待解析');
+check('批量页引导卡出现', $('#batchGuide').hidden === false);
+check('提示说清助手没开', $('#batchHint').textContent.includes('助手没开'), $('#batchHint').textContent);
+check('解析按钮写明剩余', $('#btnResolve').textContent.includes('解析剩余'), $('#btnResolve').textContent);
+check('没开助手勾选框仍禁用', $$('#batchList .bsel').every((b) => b.disabled === true));
+
+click($('#btnResolve'));
+await sleep(200);
+check('没开助手点解析弹引导', $('#sheet').hidden === false);
+click($('#sheetClose'));
+await sleep(30);
+
+click($('#batchGuideCopy'));
+await sleep(60);
+check('引导卡能复制启动命令', clipboard.some((c) => c.includes('start.sh')));
+
+const dlBefore = downloads.length;
+click($('#btnExport'));
+await sleep(120);
+check('没开助手也能导出链接', downloads.length === dlBefore + 1, String(downloads.length));
+check('导出内容是链接清单', String(downloads.at(-1)?.url || '').includes(encodeURIComponent('site.com/watch')),
+  String(downloads.at(-1)?.url || '').slice(0, 80));
 
 console.log(log.join('\n'));
 console.log(`\n通过 ${pass}，失败 ${fail}`);

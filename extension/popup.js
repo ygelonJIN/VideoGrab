@@ -1,6 +1,6 @@
 // 弹窗：列表、点名称展开预览、下载动作、任务面板。按钮一律用文字。
 import {
-  KIND_LABEL, humanBytes, humanDuration, hostOf, fileNameFromUrl
+  KIND_LABEL, humanBytes, humanDuration, hostOf, fileNameFromUrl, isHelperDown
 } from './common.js';
 
 const $ = (s) => document.querySelector(s);
@@ -26,7 +26,9 @@ const state = {
   lastSig: '',
   batchItems: [],
   batchSelected: new Set(),
-  batchGroups: []
+  batchGroups: [],
+  batchSelTouched: false,   // 用户手动改过勾选后，解析出的条目就不再强行自动勾
+  batchHelperDown: false
 };
 
 async function send(type, payload = {}) {
@@ -58,16 +60,39 @@ async function probeBackends() {
   if (r?.ok) {
     state.aria2Ok = r.aria2;
     state.helperOk = r.helper;
+    state.batchHelperDown = r.helper === false && state.batchHelperDown;
   }
+  updateHelperUI();
+}
+
+// 助手状态是全局的：三个页签都要能看见，批量页还要挂引导卡
+function updateHelperUI() {
+  const st = $('#helperStatus');
+  if (st) {
+    st.classList.toggle('on', state.helperOk === true);
+    st.classList.toggle('off', state.helperOk === false);
+    $('#helperStatusText').textContent =
+      state.helperOk === true ? '助手 在线'
+        : state.helperOk === false ? '助手 离线'
+          : '助手 检测中';
+  }
+  const guide = $('#batchGuide');
+  if (guide) guide.hidden = state.helperOk !== false;
 }
 
 let ticking = false;
+let probeTick = 0;
 async function tick() {
   if (ticking) return;
   ticking = true;
   try {
+    if (++probeTick % 5 === 0) await probeBackends();
     if (state.pane === 'sniff') await refreshList(false);
-    else await refreshJobs();
+    else if (state.pane === 'jobs') await refreshJobs();
+    else if (state.pane === 'batch' && state.batchItems.length && !resolving && probeTick % 10 === 0) {
+      await loadBatchLocal();
+      renderBatch();
+    }
   } finally {
     ticking = false;
   }
@@ -331,6 +356,11 @@ async function actHelper(item) {
     kind: item.kind, url: item.url, name: item.name, headers: item.headers
   });
   if (!r?.ok) {
+    if (isHelperDown(r?.error)) {
+      state.helperOk = false;
+      state.batchHelperDown = true;
+      updateHelperUI();
+    }
     openHelperSheet();
     return;
   }
@@ -395,8 +425,9 @@ async function refreshJobs() {
         if (j.status === 'queued') queuedN++;
         parts.push(helperJobEl(j));
       }
-    }
+    } else state.helperOk = false;
   } catch { state.helperOk = false; }
+  updateHelperUI();
 
   const list = $('#jobList');
   list.innerHTML = '';
@@ -521,7 +552,14 @@ const BATCH_STORE = 'batchPanel';
 
 async function saveBatchState() {
   try {
-    await chrome.storage.session.set({ [BATCH_STORE]: { items: state.batchItems, ts: Date.now() } });
+    await chrome.storage.session.set({
+      [BATCH_STORE]: {
+        items: state.batchItems,
+        selected: [...state.batchSelected],
+        selTouched: state.batchSelTouched,
+        ts: Date.now()
+      }
+    });
   } catch { /* 配额满了就算了，不影响当前这一屏 */ }
 }
 
@@ -529,11 +567,22 @@ async function restoreBatchState() {
   try {
     const got = await chrome.storage.session.get(BATCH_STORE);
     const saved = got[BATCH_STORE];
-    if (saved?.items?.length) state.batchItems = saved.items;
+    if (saved?.items?.length) {
+      state.batchItems = saved.items;
+      // 勾选也要接上：弹窗重开不该把勾好的又清掉
+      if (Array.isArray(saved.selected)) {
+        state.batchSelected = new Set(saved.selected);
+        state.batchSelTouched = !!saved.selTouched;
+      }
+    }
   } catch { /* ignore */ }
+  renderBatch();
   if (!state.batchItems.length) return;
   await loadBatchLocal();
   renderBatch();
+  // 解析是在弹窗里跑的，弹窗一关就断 —— 重开时看到「待解析」要自动续上，
+  // 否则用户只会看到一屏永远不动的「待解析」
+  if (state.batchItems.some((i) => i.status === 'pending')) resolveBatch();
 }
 
 function labelOf(it) {
@@ -576,8 +625,19 @@ async function scanPage() {
     const r = await send('batch:scan', { tabId: state.tabId, pageUrl });
     if (!r?.ok) {
       $('#batchHint').textContent = '';
+      if (isHelperDown(r?.error)) {
+        state.helperOk = false;
+        updateHelperUI();
+        openHelperSheet();
+      }
       toast(r?.error || '扫描失败', true);
       return;
+    }
+    if (r.helperDown) {
+      // 助手没开：本地也能按链接结构认条目，但解析直链必须有助手
+      state.batchHelperDown = true;
+      state.helperOk = false;
+      updateHelperUI();
     }
 
     const groups = (r.scan?.listing || []).filter((g) => g.items?.length);
@@ -586,7 +646,9 @@ async function scanPage() {
       state.batchItems = [];
       renderBatch();
       $('#batchHint').textContent = '';
-      toast('这一页没认出条目列表：换个列表页，或先在页面里滚到底再扫', true);
+      toast(r.helperDown
+        ? '助手没开，页面链接也没认出条目列表：启动助手后扫得更全'
+        : '这一页没认出条目列表：换个列表页，或先在页面里滚到底再扫', true);
       return;
     }
 
@@ -596,7 +658,10 @@ async function scanPage() {
       url: it.url, label: it.label || '', title: '', status: 'pending', media: null, reason: ''
     }));
     state.batchSelected = new Set();
-    $('#batchHint').textContent = `认出 ${best.count} 条（路径模板 ${best.template}），开始解析…`;
+    state.batchSelTouched = false;
+    $('#batchHint').textContent = r.helperDown
+      ? `认出 ${best.count} 条（路径模板 ${best.template}）。助手没开，只能先列条目：启动助手后点「解析剩余 ${best.count} 条」`
+      : `认出 ${best.count} 条（路径模板 ${best.template}），开始解析…`;
     await loadBatchLocal();
     renderBatch();
     await saveBatchState();
@@ -608,13 +673,20 @@ async function scanPage() {
   }
 
   // 扫描完直接解析：否则用户会看到一屏灰勾选框，根本不知道下一步该点什么
-  if (state.batchItems.some((i) => i.status === 'pending')) resolveBatch();
+  // （助手没开时解析不了，条目先停在「待解析」，引导卡会告诉用户怎么办）
+  if (!state.batchHelperDown && state.batchItems.some((i) => i.status === 'pending')) resolveBatch();
 }
 
 let resolving = false;
 
-async function resolveBatch() {
+async function resolveBatch(retryFailed = false) {
   if (resolving) return;
+  if (retryFailed) {
+    for (const it of state.batchItems) {
+      if (it.status === 'failed') { it.status = 'pending'; it.reason = ''; }
+    }
+    renderBatch();
+  }
   const pending = state.batchItems.filter((i) => i.status === 'pending');
   if (!pending.length) return toast('没有待解析的条目');
 
@@ -632,8 +704,32 @@ async function resolveBatch() {
       $('#batchHint').textContent =
         `解析中 ${i + 1}~${Math.min(i + CHUNK, pending.length)} / ${pending.length} …`;
 
-      const r = await send('batch:resolve', { urls: chunk.map((x) => x.url) });
-      if (!r?.ok) { toast(r?.error || '解析失败', true); break; }
+      let r;
+      try {
+        r = await send('batch:resolve', { urls: chunk.map((x) => x.url) });
+      } catch (e) {
+        r = { ok: false, error: e?.message || String(e) };
+      }
+      if (!r?.ok) {
+        const err = String(r?.error || '解析失败');
+        if (isHelperDown(err)) {
+          // 助手掉了，后面的批次也是白试：停下来给引导，别一条条报错刷屏
+          state.helperOk = false;
+          state.batchHelperDown = true;
+          updateHelperUI();
+          openHelperSheet();
+          toast(err, true);
+          break;
+        }
+        // 这一批失败不影响后面的批次
+        for (const it of chunk) {
+          it.status = 'failed';
+          it.reason = err.slice(0, 120);
+        }
+        renderBatch();
+        await saveBatchState();
+        continue;
+      }
 
       const byUrl = new Map((r.items || []).map((x) => [x.url, x]));
       for (const it of chunk) {
@@ -643,7 +739,8 @@ async function resolveBatch() {
         it.title = got.title || '';
         it.reason = got.reason || '';
         it.status = got.ok ? 'ok' : got.gone ? 'gone' : got.unavailable ? 'unavailable' : 'failed';
-        if (got.ok) state.batchSelected.add(it.url);
+        // 用户手动改过勾选就不再强行自动勾，不然刚取消的又会被后解析出来的带上去
+        if (got.ok && !state.batchSelTouched) state.batchSelected.add(it.url);
       }
       renderBatch();
       await saveBatchState();
@@ -657,10 +754,13 @@ async function resolveBatch() {
     btnScan.disabled = false;
     const n = (s) => state.batchItems.filter((i) => i.status === s).length;
     if (state.batchItems.length) {
-      $('#batchHint').textContent =
-        `可下 ${n('ok')} · 源失效 ${n('unavailable')} · 已下架 ${n('gone')} · 失败 ${n('failed')}`;
+      const left = n('pending');
+      $('#batchHint').textContent = (state.batchHelperDown && left)
+        ? `助手没开，还有 ${left} 条待解析：启动助手后点「解析剩余 ${left} 条」`
+        : `可下 ${n('ok')} · 源失效 ${n('unavailable')} · 已下架 ${n('gone')} · 失败 ${n('failed')}`;
     }
     renderBatch();
+    await saveBatchState();
   }
 }
 
@@ -673,7 +773,15 @@ async function submitBatch() {
     const r = await send('batch:submit', {
       items: items.map((i) => ({ url: i.url, name: i.title || i.label, media: i.media }))
     });
-    if (!r?.ok) { toast(r?.error || '提交失败', true); return; }
+    if (!r?.ok) {
+      if (isHelperDown(r?.error)) {
+        state.helperOk = false;
+        updateHelperUI();
+        openHelperSheet();
+      }
+      toast(r?.error || '提交失败', true);
+      return;
+    }
     const okN = (r.jobs || []).length;
     toast(`已加入 ${okN} 个下载任务${r.errors?.length ? `，${r.errors.length} 个失败` : ''}`, !okN);
     await loadBatchLocal();
@@ -690,13 +798,23 @@ function renderBatch() {
   const rows = state.batchItems;
   $('#batchEmpty').hidden = rows.length > 0;
 
-  const okAll = rows.filter((i) => i.status === 'ok').length;
-  $('#btnBatchDown').disabled = okAll === 0;
-  // 没有「可下」的时候，全选框要自己说明不能点，否则就是个死控件
-  const selAll = $('#batchSelAll');
-  selAll.disabled = okAll === 0;
-  selAll.title = okAll === 0 ? (rows.length ? '这一页没有可下的条目' : '先扫描本页') : '全选可下的条目';
-  $('#btnResolve').disabled = resolving || !rows.some((i) => i.status === 'pending');
+  const pendingN = rows.filter((i) => i.status === 'pending').length;
+  const failedN = rows.filter((i) => i.status === 'failed').length;
+  const btnR = $('#btnResolve');
+  if (!rows.length) {
+    btnR.textContent = '解析条目';
+    btnR.disabled = true;
+    btnR.title = '先扫描本页';
+  } else {
+    // 按钮要自己说清楚还剩什么活，别停在一个和现状对不上的名字上
+    btnR.textContent = resolving ? '解析中'
+      : pendingN ? `解析剩余 ${pendingN} 条`
+        : failedN ? `重试失败 ${failedN} 条`
+          : '全部已解析';
+    btnR.disabled = resolving || (!pendingN && !failedN);
+    btnR.title = failedN && !pendingN ? '把解析失败的条目再试一遍' : '把还没解析的条目解析出直链';
+  }
+  $('#btnScan').disabled = resolving;
 
   for (const it of rows) {
     const st = BATCH_STATUS[it.status] || BATCH_STATUS.pending;
@@ -720,17 +838,33 @@ function renderBatch() {
         <div class="title"><span class="name" title="${esc(labelOf(it))}">${esc(labelOf(it))}</span></div>
         <div class="sub">
           <span class="meta">${chips.join('')}${size ? `<i>·</i>${esc(size)}` : ''}</span>
+          <span class="ops"><button class="mini" data-bact="copy">复制链接</button></span>
           ${it.reason && it.status !== 'ok' ? `<span class="why" title="${esc(it.reason)}">${esc(it.reason)}</span>` : ''}
         </div>
       </div>`;
     list.appendChild(li);
   }
 
+  syncBatchSelUI();
+}
+
+// 勾选状态原地同步：整表重建会把勾选框、滚动位置全搞乱
+function syncBatchSelUI() {
+  const rows = state.batchItems;
+  const okAll = rows.filter((i) => i.status === 'ok').length;
+  for (const li of $('#batchList').querySelectorAll('li.row')) {
+    const box = li.querySelector('.bsel');
+    if (box && !box.disabled) box.checked = state.batchSelected.has(li.dataset.url);
+  }
+  const selAll = $('#batchSelAll');
   const picked = state.batchSelected.size;
-  $('#batchSelInfo').textContent = rows.length
-    ? `${picked ? '已勾 ' + picked : '共可下 ' + okAll} 条`
-    : '';
+  // 没有「可下」的时候，全选框要自己说明不能点，否则就是个死控件
+  selAll.disabled = okAll === 0;
   selAll.checked = okAll > 0 && picked === okAll;
+  selAll.indeterminate = picked > 0 && picked < okAll;
+  selAll.title = okAll === 0 ? (rows.length ? '这一页没有可下的条目' : '先扫描本页') : '全选可下的条目';
+  $('#batchSelInfo').textContent = rows.length ? `已勾 ${picked} / 可下 ${okAll} 条` : '';
+  $('#btnBatchDown').disabled = picked === 0;
 }
 
 // ------------------------------------------------------------------ 事件
@@ -739,28 +873,50 @@ function bindEvents() {
   $('#tabJobs').addEventListener('click', () => switchPane('jobs'));
   $('#tabBatch').addEventListener('click', () => switchPane('batch'));
   $('#btnScan').addEventListener('click', scanPage);
-  $('#btnResolve').addEventListener('click', resolveBatch);
+  // 点按钮 = 把待解析和失败的都再跑一遍（自动续解析只捡 pending）
+  $('#btnResolve').addEventListener('click', () => resolveBatch(true));
   $('#btnBatchDown').addEventListener('click', submitBatch);
   $('#btnBatchRefresh').addEventListener('click', async () => {
     await loadBatchLocal();
     renderBatch();
     toast('状态已刷新');
   });
+  $('#btnExport').addEventListener('click', exportBatchLinks);
+  $('#batchGuideCopy').addEventListener('click', () => actCopy(HELPER_CMD, '启动命令'));
+  $('#batchGuideRecheck').addEventListener('click', recheckGuide);
+  $('#batchGuideSteps').addEventListener('click', openHelperSheet);
+  $('#helperStatus').addEventListener('click', () => {
+    if (state.helperOk === false) openHelperSheet();
+    else if (state.helperOk === true) toast('本地助手已连接（127.0.0.1:8765）');
+    else probeBackends();
+  });
   $('#batchSelAll').addEventListener('change', (e) => {
+    state.batchSelTouched = true;
     if (e.target.checked) {
       for (const i of state.batchItems) if (i.status === 'ok') state.batchSelected.add(i.url);
     } else {
       state.batchSelected.clear();
     }
-    renderBatch();
+    syncBatchSelUI();
+    saveBatchState();
   });
   $('#batchList').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-bact]');
+    if (!btn) return;
+    const row = e.target.closest('li.row');
+    if (!row) return;
+    const it = state.batchItems.find((x) => x.url === row.dataset.url);
+    if (it && btn.dataset.bact === 'copy') return actCopy(it.url);
+  });
+  $('#batchList').addEventListener('change', (e) => {
     if (!e.target.classList.contains('bsel')) return;
     const row = e.target.closest('li.row');
     if (!row) return;
+    state.batchSelTouched = true;
     if (e.target.checked) state.batchSelected.add(row.dataset.url);
     else state.batchSelected.delete(row.dataset.url);
-    renderBatch();
+    syncBatchSelUI();
+    saveBatchState();
   });
   $('#btnOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
   $('#btnRefresh').addEventListener('click', () => refreshList(true));
@@ -980,11 +1136,46 @@ async function recheckHelper() {
     st.textContent = '✅ 连上了，关掉这个提示就能用';
     st.className = 'd ok';
     state.helperOk = true;
+    state.batchHelperDown = false;
+    updateHelperUI();
+    // 助手回来了就接着干活，别让用户再点一次
+    if (state.batchItems.some((i) => i.status === 'pending')) resolveBatch();
   } else {
     st.textContent = '还是连不上：确认那个终端窗口还开着、命令没报错';
     st.className = 'd err';
     state.helperOk = false;
+    updateHelperUI();
   }
+}
+
+// 批量页引导卡上的「重新检测」：轻量版，不弹整页引导
+async function recheckGuide() {
+  const st = $('#batchGuideState');
+  st.textContent = '检测中…';
+  const r = await send('diag');
+  if (r?.ok && r.helper) {
+    st.textContent = '连上了，开始干活';
+    state.helperOk = true;
+    state.batchHelperDown = false;
+    updateHelperUI();
+    if (state.batchItems.some((i) => i.status === 'pending')) resolveBatch();
+  } else {
+    state.helperOk = false;
+    updateHelperUI();
+    st.textContent = '还是连不上：确认终端窗口还开着、命令没报错';
+  }
+}
+
+// 没有助手时批量页还能干的事：把条目链接导出来
+async function exportBatchLinks() {
+  const items = state.batchSelected.size
+    ? state.batchItems.filter((i) => state.batchSelected.has(i.url))
+    : state.batchItems;
+  if (!items.length) return toast('还没有可导出的条目', true);
+  const text = items.map((i) => `${i.title || labelOf(i)}\t${i.url}`).join('\n') + '\n';
+  const url = 'data:text/plain;charset=utf-8,' + encodeURIComponent(text);
+  await chrome.downloads.download({ url, filename: '批量链接.txt', saveAs: true });
+  toast(`已导出 ${items.length} 条链接${state.batchSelected.size ? '' : '（全部）'}`);
 }
 
 let toastTimer = null;

@@ -9,12 +9,15 @@
 <body>
 <div class="app">
   <header>
-    <div class="brand">视频下载器</div>
+    <div class="brand"><span class="logo"></span><span>视频下载器</span></div>
     <nav class="tabs">
       <button id="tabSniff" class="tab active" data-pane="sniff">嗅探<b id="cnt"></b></button>
       <button id="tabJobs" class="tab" data-pane="jobs">任务</button>
       <button id="tabBatch" class="tab" data-pane="batch">批量</button>
     </nav>
+    <button id="helperStatus" class="status" title="本地助手（127.0.0.1:8765），点开看怎么启动">
+      <span class="dot"></span><span id="helperStatusText">助手 检测中</span>
+    </button>
     <button id="btnOptions" class="ghost">设置</button>
   </header>
 
@@ -34,9 +37,15 @@
     <div id="hint" class="hint"></div>
     <ul id="list" class="list"></ul>
     <div id="empty" class="empty">
-      <p>还没有嗅到媒体</p>
+      <p class="e-title">还没有嗅到媒体</p>
       <p class="sub">在播放页点一下播放，或刷新页面</p>
     </div>
+    <footer id="bar">
+      <label class="check"><input type="checkbox" id="selAll"><span>全选</span></label>
+      <span id="selInfo" class="hint"></span>
+      <button id="btnAria2" class="primary">aria2 下载</button>
+      <button id="btnTxt" class="ghost" title="生成 aria2 的 -i 任务文件，里面已经写好 Referer / Cookie；终端跑 aria2c -i 这个文件就能批量下">导出清单</button>
+    </footer>
   </section>
 
   <section id="paneJobs" class="pane" hidden>
@@ -45,14 +54,28 @@
       <button id="btnJobRefresh" class="ghost" style="margin-left:auto">刷新</button>
     </div>
     <ul id="jobList" class="list"></ul>
-    <div id="jobEmpty" class="empty"><p>没有任务</p></div>
+    <div id="jobEmpty" class="empty"><p class="e-title">没有任务</p></div>
   </section>
 
   <section id="paneBatch" class="pane" hidden>
+    <div id="batchGuide" class="guide" hidden>
+      <div class="guide-top">
+        <b>本地助手没在运行</b>
+        <span>批量解析直链、下载都靠它；现在还能扫条目、复制和导出链接</span>
+      </div>
+      <pre class="guide-cmd">cd "/Volumes/TUF ESD-T1A Media/视频下载器/helper" &amp;&amp; ./start.sh</pre>
+      <div class="guide-acts">
+        <button id="batchGuideCopy" class="mini">复制启动命令</button>
+        <button id="batchGuideRecheck" class="ghost">重新检测</button>
+        <button id="batchGuideSteps" class="ghost">看详细步骤</button>
+        <span id="batchGuideState" class="hint"></span>
+      </div>
+    </div>
     <div class="toolbar">
       <button id="btnScan" class="primary">扫描本页</button>
       <button id="btnResolve" class="ghost">解析选中</button>
-      <button id="btnBatchRefresh" class="ghost" style="margin-left:auto">刷新状态</button>
+      <button id="btnBatchRefresh" class="ghost">刷新状态</button>
+      <button id="btnExport" class="ghost">导出链接</button>
     </div>
     <div id="batchHint" class="hint"></div>
     <div class="bar-inline">
@@ -62,25 +85,19 @@
     </div>
     <ul id="batchList" class="list"></ul>
     <div id="batchEmpty" class="empty">
-      <p>还没扫描</p>
+      <p class="e-title">还没扫描</p>
       <p class="sub">在视频列表页点「扫描本页」，不用点开任何视频</p>
     </div>
   </section>
-
-  <footer id="bar">
-    <label class="check"><input type="checkbox" id="selAll"><span>全选</span></label>
-    <span id="selInfo" class="hint"></span>
-    <button id="btnAria2" class="primary">aria2 下载</button>
-    <button id="btnTxt" class="ghost" title="生成 aria2 的 -i 任务文件，里面已经写好 Referer / Cookie；终端跑 aria2c -i 这个文件就能批量下">导出清单</button>
-  </footer>
 </div>
+
 <div id="sheet" class="sheet" hidden>
   <div class="sheet-card">
     <div class="sheet-head">
       <b>本地助手没在运行</b>
       <button id="sheetClose" class="ghost">关闭</button>
     </div>
-    <p class="sheet-lead">浏览器不让插件启动电脑上的程序，所以「读时长和分辨率」「合并 M3U8」这两件事，得交给浏览器外面的一个小助手。</p>
+    <p class="sheet-lead">浏览器不让插件启动电脑上的程序，所以「读时长和分辨率」「合并 M3U8」「批量解析直链」这几件事，得交给浏览器外面的一个小助手。</p>
 
     <div class="step">
       <span class="n">1</span>

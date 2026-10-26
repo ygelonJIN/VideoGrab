@@ -119,6 +119,63 @@ export function hostOf(url) {
   try { return new URL(url).host; } catch { return ''; }
 }
 
+// ---------------------------------------------------------------- 批量扫描兜底
+// 导航栏、法律页、登录页，当条目列表看会全是噪音
+// （和 helper/extract.mjs 的 NAV_HINT 保持一致，selftest 会对照）
+const NAV_HINT =
+  /\/(?:login|logout|register|signup|signin|terms|privacy|dmca|support|contact|about|faq|help|upload|press|service|tos|cookies?|2257|rss|feed)\/?$/i;
+
+/** 路径模板：把数字 id / uuid 抹成 :id（和 helper/extract.mjs 的 pathTemplate 保持一致） */
+export function pathTemplate(href) {
+  let s = String(href || '');
+  try {
+    const u = new URL(s);
+    s = u.host + u.pathname;
+  } catch { return s; }
+  return s
+    .replace(/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '/:id')
+    .replace(/\/\d{3,}/g, '/:id')
+    .replace(/\/[0-9a-f]{16,}/gi, '/:id');
+}
+
+/**
+ * 从页面链接里认出条目列表：同一路径模板重复 >= 3 次就是条目。
+ * 助手不在线时的兜底，只看链接结构、不联网；links 元素可以是字符串或 {url, label}。
+ */
+export function groupListing(links) {
+  const items = [];
+  const seen = new Set();
+  for (const raw of links || []) {
+    const it = typeof raw === 'string' ? { url: raw, label: '' } : (raw || {});
+    const url = String(it.url || '');
+    if (!url || seen.has(url)) continue;
+    let path = '';
+    try { path = new URL(url).pathname; } catch { continue; }
+    if (NAV_HINT.test(path)) continue;
+    seen.add(url);
+    items.push({ url, label: String(it.label || '').replace(/\s+/g, ' ').trim().slice(0, 80) });
+  }
+  const groups = new Map();
+  for (const it of items) {
+    const t = pathTemplate(it.url);
+    if (!groups.has(t)) groups.set(t, []);
+    groups.get(t).push(it);
+  }
+  return [...groups.entries()]
+    .filter(([, list]) => list.length >= 3)
+    .map(([template, list]) => ({
+      template,
+      count: list.length,
+      items: list.map((i) => ({ url: i.url, label: i.label }))
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+
+/** 报错文案是不是"助手没在跑"这一类（弹窗据此弹引导面板，而不是干报错） */
+export function isHelperDown(msg) {
+  return /助手没在运行|助手响应超时|连不上|Failed to fetch|NetworkError|ECONNREFUSED/i.test(String(msg || ''));
+}
+
 /** 把嗅探到的头转成 aria2 能用的 ["Referer: ..."] 数组 */
 export function headerLines(item, settings = DEFAULT_SETTINGS) {
   const h = item.headers || {};

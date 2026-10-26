@@ -1,7 +1,8 @@
 // 后台：嗅探媒体请求、保存请求头、调度下载。
 import {
   DEFAULT_SETTINGS, classify, fileNameFromUrl, aria2Call, aria2Options,
-  aria2InputText, parsePlaylist, helperCall, toTask, ffmpegCommandOneLine
+  aria2InputText, parsePlaylist, helperCall, toTask, ffmpegCommandOneLine,
+  groupListing
 } from './common.js';
 
 const MAX_ITEMS = 300;
@@ -20,7 +21,7 @@ const keyOf = (tabId) => `tab:${tabId}`;
 const BATCH_KEY = 'batchHistory';
 
 /**
- * 注入到页面里跑：把 DOM 里的链接全收上来。
+ * 注入到页面里跑：把 DOM 里的链接连同可读标签一起收上来。
  * 列表页往往是懒加载/JS 渲染的，后台直接抓 HTML 是空的，所以必须借页面自己的 DOM。
  * 注意：这个函数会被序列化后注入，不能引用外部变量。
  */
@@ -31,10 +32,21 @@ function collectPageLinks() {
     if (!raw || /^(?:#|javascript:|mailto:|tel:)/i.test(String(raw).trim())) continue;
     try {
       const u = new URL(raw, location.href);
-      if (u.protocol === 'http:' || u.protocol === 'https:') out.push(u.href);
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        out.push({
+          url: u.href,
+          label: (a.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+        });
+      }
     } catch { /* 畸形链接跳过 */ }
   }
-  return [...new Set(out)];
+  // 同一 URL 可能被图片链接和标题链接各包一层，留标签最长的那个
+  const byUrl = new Map();
+  for (const it of out) {
+    const prev = byUrl.get(it.url);
+    if (!prev || it.label.length > prev.label.length) byUrl.set(it.url, it);
+  }
+  return [...byUrl.values()];
 }
 
 function safeName(s, fallback) {
@@ -328,20 +340,37 @@ async function handle(msg) {
           target: { tabId: msg.tabId },
           func: collectPageLinks
         });
-        links = Array.isArray(probe?.[0]?.result) ? probe[0].result : [];
+        const raw = Array.isArray(probe?.[0]?.result) ? probe[0].result : [];
+        // 注入函数返回 {url,label}；老的测试桩可能只给字符串，两种都收
+        links = raw.map((x) => (typeof x === 'string' ? { url: x, label: '' } : x)).filter((x) => x?.url);
       } catch (e) {
         throw new Error('读不到这个页面的内容：' + (e?.message || e));
       }
-      const scan = await helperCall(s, '/api/scan', {
-        method: 'POST',
-        body: JSON.stringify({
-          url: msg.pageUrl || '',
-          links,
-          headers: { ua: s.userAgent },
-          proxy: await resolveProxy()
-        })
-      }, 60000);
-      return { scan, linkCount: links.length };
+      // 助手优先（它还能顺便分析 HTML）；助手不通就退回本地分组 —— 只看链接结构，照样能列条目
+      let scan = null;
+      let helperDown = false;
+      try {
+        scan = await helperCall(s, '/api/scan', {
+          method: 'POST',
+          body: JSON.stringify({
+            url: msg.pageUrl || '',
+            links,
+            headers: { ua: s.userAgent },
+            proxy: await resolveProxy()
+          })
+        }, 60000);
+      } catch (e) {
+        helperDown = true;
+        const listing = groupListing(links);
+        scan = {
+          source: 'local',
+          title: '',
+          listing,
+          total: listing.reduce((n, g) => n + g.count, 0)
+        };
+        if (!listing.length && !links.length) throw e;  // 页面链接都没读到，就别假装扫过了
+      }
+      return { scan, linkCount: links.length, helperDown };
     }
     case 'batch:resolve': {
       const s = await getSettings();
