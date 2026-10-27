@@ -271,6 +271,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
+// 批量消息的参数清洗：只收非空字符串，去重，限个数（防止一次塞几千条把 SW 拖死）
+function asList(v, max = 100) {
+  const arr = Array.isArray(v) ? v : [];
+  return [...new Set(arr.map((x) => String(x ?? '').trim()).filter(Boolean))].slice(0, max);
+}
+
 async function handle(msg) {
   await settingsReady;
   switch (msg.type) {
@@ -538,6 +544,25 @@ async function handle(msg) {
       await aria2Call(s, method, [msg.gid]);
       return {};
     }
+    // 批量取消：aria2 没有批量 remove，助手也没有批量 cancel —— 后台一次跑完，别让弹窗发 N 条消息
+    case 'jobs:cancel-many': {
+      const s = await getSettings();
+      const gids = asList(msg.gids, 100);
+      const ids = asList(msg.ids, 100);
+      const failed = [];
+      let canceled = 0;
+      for (const gid of gids) {
+        try { await aria2Call(s, 'aria2.remove', [gid], 6000); canceled++; }
+        catch (e) { failed.push({ id: gid, via: 'aria2', error: e?.message || String(e) }); }
+      }
+      for (const id of ids) {
+        try {
+          await helperCall(s, `/api/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }, 8000);
+          canceled++;
+        } catch (e) { failed.push({ id, via: 'helper', error: e?.message || String(e) }); }
+      }
+      return { canceled, failed };
+    }
     case 'file:delete': {
       const s = await getSettings();
       const r = await helperCall(s, '/api/file/delete', {
@@ -546,6 +571,25 @@ async function handle(msg) {
       }, 10000);
       if (r && r.ok === false) throw new Error(r.error || '删除失败');
       return { removed: !!r?.removed };
+    }
+    // 批量删文件：走同一个 /api/file/delete（双保险在白名单那边），这里只负责去重和汇总
+    case 'file:delete-many': {
+      const s = await getSettings();
+      const paths = asList(msg.paths, 200);
+      if (!paths.length) return { deletedPaths: [], failed: [], deleted: 0 };
+      // 助手不在就先说清楚，别让 200 个路径各等一次超时
+      try { await helperCall(s, '/api/health', {}, 4000); }
+      catch (e) { throw new Error(`本地助手连不上，删不了文件：${e?.message || e}`); }
+      const deletedPaths = [];
+      const failed = [];
+      for (const p of paths) {
+        try {
+          const r = await helperCall(s, '/api/file/delete', { method: 'POST', body: JSON.stringify({ path: p }) }, 10000);
+          if (r && r.ok === false) throw new Error(r.error || '删除失败');
+          deletedPaths.push(p);
+        } catch (e) { failed.push({ path: p, error: e?.message || String(e) }); }
+      }
+      return { deletedPaths, failed, deleted: deletedPaths.length };
     }
     case 'file:reveal': {
       const s = await getSettings();
@@ -560,6 +604,26 @@ async function handle(msg) {
       const s = await getSettings();
       try { await aria2Call(s, 'aria2.removeDownloadResult', [msg.gid], 4000); } catch { /* 已经不在列表里也无所谓 */ }
       return {};
+    }
+    // 批量清记录：单条时抛错无所谓，批量里一个已消失的 gid 不该让整批失败
+    case 'job:forget-many': {
+      const s = await getSettings();
+      const gids = asList(msg.gids, 100);
+      const ids = asList(msg.ids, 100);
+      const failed = [];
+      let aria2 = 0;
+      let helper = 0;
+      for (const gid of gids) {
+        try { await aria2Call(s, 'aria2.removeDownloadResult', [gid], 4000); aria2++; }
+        catch (e) { failed.push({ id: gid, via: 'aria2', error: e?.message || String(e) }); }
+      }
+      for (const id of ids) {
+        try {
+          await helperCall(s, `/api/jobs/${encodeURIComponent(id)}/forget`, { method: 'POST' }, 5000);
+          helper++;
+        } catch (e) { failed.push({ id, via: 'helper', error: e?.message || String(e) }); }
+      }
+      return { aria2, helper, failed };
     }
     case 'helper:forget': {
       const s = await getSettings();

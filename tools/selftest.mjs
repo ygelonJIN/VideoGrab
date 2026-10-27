@@ -163,11 +163,22 @@ globalThis.chrome = {
 
 let rpcBodies = [];
 let scanBodies = [];
+let fileDeletes = [];   // /api/file/delete 收到的 body，批量删文件要断言真的逐条打到助手
 let scanOnline = false;   // true = /api/scan 返回真 JSON（助手在线）；false = 没有 json()，helperCall 会抛
 globalThis.fetch = async (url, init) => {
   if (String(url).includes('6800')) {
     rpcBodies.push(JSON.parse(init.body));
     return { ok: true, json: async () => ({ result: 'gid-' + rpcBodies.length }) };
+  }
+  if (String(url).includes('/api/parse')) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, status: 200, text: media }) };
+  }
+  if (String(url).includes('/api/health')) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, ffmpeg: true, aria2c: true }) };
+  }
+  if (String(url).includes('/api/file/delete')) {
+    fileDeletes.push(JSON.parse(init.body));
+    return { ok: true, status: 200, json: async () => ({ ok: true, removed: true }) };
   }
   if (String(url).includes('/api/probe')) {
     return { ok: true, status: 200, json: async () => ({ ok: true, media: { duration: 42, width: 1280, height: 720, thumbnail: 'data:image/jpeg;base64,xxxx' } }) };
@@ -191,7 +202,8 @@ globalThis.fetch = async (url, init) => {
       })
     };
   }
-  return { ok: true, text: async () => media, status: 200 };
+  // 默认分支按真助手来：一律回 JSON，否则 helperCall 的 res.json() 会抛
+  return { ok: true, text: async () => media, json: async () => ({ ok: true }), status: 200 };
 };
 
 await import(path.join(EXT, 'background.js'));
@@ -282,6 +294,25 @@ check('batch:scan 发给助手的是纯字符串', sentLinks.length === 3 && sen
 check('助手在线不误标本地兜底', res.ok && res.helperDown === false);
 check('助手结果回填标签', res.scan?.listing?.[0]?.items?.[0]?.label === '第 101 集',
   JSON.stringify(res.scan?.listing?.[0]?.items?.[0]));
+
+// ---------------------------------------------------------------- 批量取消 / 清记录 / 删文件
+res = await send({ type: 'file:delete-many', paths: ['/Users/x/Desktop/a.mp4', '/Users/x/Desktop/a.mp4', '/Users/x/Desktop/b.mp4'] });
+check('批量删文件去重后删 2 个', res.ok && res.deleted === 2, JSON.stringify(res).slice(0, 200));
+check('批量删文件逐个打到助手', fileDeletes.length === 2 && fileDeletes[0].path === '/Users/x/Desktop/a.mp4',
+  JSON.stringify(fileDeletes));
+
+res = await send({ type: 'file:delete-many', paths: [] });
+check('空路径列表直接返回', res.ok && res.deleted === 0);
+
+res = await send({ type: 'job:forget-many', gids: ['gid-1'], ids: ['h1'] });
+check('批量清记录 aria2 和助手都走', res.ok && res.aria2 === 1 && res.helper === 1, JSON.stringify(res).slice(0, 200));
+
+res = await send({ type: 'jobs:cancel-many', gids: ['gid-2'], ids: ['h2'] });
+check('批量取消两边都走', res.ok && res.canceled === 2, JSON.stringify(res).slice(0, 200));
+check('批量取消用 aria2.remove', rpcBodies.at(-1)?.method === 'aria2.remove', JSON.stringify(rpcBodies.at(-1)).slice(0, 120));
+
+res = await send({ type: 'jobs:cancel-many', gids: [], ids: [] });
+check('批量取消空列表不报错', res.ok && res.canceled === 0);
 
 // ---------------------------------------------------------------- 3. id 交叉检查
 function idsIn(file) {

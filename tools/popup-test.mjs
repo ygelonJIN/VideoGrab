@@ -45,10 +45,14 @@ const ITEMS = [
 
 const clipboard = [];
 const sent = [];
+const confirms = [];
+const bulk = [];         // 批量消息原文，用来断言 gid / path 传对了
 const downloads = [];
 let helperOnline = true;
 let scanExtra = false;   // 扫出 4 条（多一条 /4），用来测全选/半选和重试
 let resolve4Ok = false;  // /4 第一次解析失败，重试才成功
+let aria2Tick = 0;       // 打开后才每查一次涨一点：逼任务列表真的重建，验证勾选能撑过重建
+let aria2TickOn = false;
 
 function makeChrome() {
   return {
@@ -75,7 +79,7 @@ function makeChrome() {
           case 'helper:submit': return helperOnline ? { ok: true } : { ok: false, error: '助手没在运行（127.0.0.1:8765 连不上）' };
           case 'aria2:status': return {
             ok: true, dead: [], list: [
-              { gid: 'g1', name: 'movie.mp4', kind: 'MP4', status: 'active', totalLength: 1000, completedLength: 512, downloadSpeed: 2048, connections: 8, errorMessage: '', files: [{ path: '/Users/x/Downloads/VideoGrab/movie.mp4' }] },
+              { gid: 'g1', name: 'movie.mp4', kind: 'MP4', status: 'active', totalLength: 1000, completedLength: 512 + (aria2TickOn ? aria2Tick++ : 0), downloadSpeed: 2048, connections: 8, errorMessage: '', files: [{ path: '/Users/x/Downloads/VideoGrab/movie.mp4' }] },
               { gid: 'g2', name: 'old.mp4', kind: 'MP4', status: 'complete', totalLength: 200, completedLength: 200, downloadSpeed: 0, connections: 0, errorMessage: '', exists: true, files: [{ path: '/Users/x/Downloads/VideoGrab/old.mp4' }] },
               { gid: 'g3', name: 'gone.mp4', kind: 'MP4', status: 'complete', totalLength: 300, completedLength: 300, downloadSpeed: 0, connections: 0, errorMessage: '', exists: false, files: [{ path: '/Users/x/Downloads/VideoGrab/gone.mp4' }] }
             ]
@@ -130,6 +134,15 @@ function makeChrome() {
           }
           case 'batch:history': return { ok: true, history: {} };
           case 'batch:submit': return { ok: true, jobs: [{ id: 'j1', name: 'A' }], errors: [], history: {} };
+          case 'jobs:cancel-many':
+            bulk.push(msg);
+            return { ok: true, canceled: (msg.gids?.length || 0) + (msg.ids?.length || 0), failed: [] };
+          case 'job:forget-many':
+            bulk.push(msg);
+            return { ok: true, aria2: (msg.gids || []).length, helper: (msg.ids || []).length, failed: [] };
+          case 'file:delete-many':
+            bulk.push(msg);
+            return { ok: true, deletedPaths: msg.paths || [], failed: [], deleted: (msg.paths || []).length };
           default: return { ok: true };
         }
       },
@@ -142,7 +155,16 @@ function makeChrome() {
         set: async () => {}
       },
       session: {
-        get: async () => ({}),
+        // 预置 320 MB 累计：验证「下到 300 MB 就提前提醒换 IP」
+        get: async (k) => {
+          const keys = Array.isArray(k) ? k : [k];
+          const out = {};
+          for (const key of keys) {
+            if (key === 'ipMeter') out.ipMeter = { bytes: 320 * 1024 * 1024, at: Date.now() };
+            if (key === 'ipHintState') out.ipHintState = {};
+          }
+          return out;
+        },
         set: async () => {}
       }
     },
@@ -161,7 +183,7 @@ const { window } = dom;
 const { document } = window;
 
 window.chrome = makeChrome();
-window.confirm = () => true;
+window.confirm = (m) => { confirms.push(String(m)); return true; };
 document.execCommand = () => {          // 模拟 execCommand 复制
   const ta = document.querySelector('textarea');
   if (ta) clipboard.push(ta.value);
@@ -263,6 +285,10 @@ const queuedJob = $$('#jobList .job').find((el) => el.textContent.includes('wait
 check('排队中：标明排队中', queuedJob && queuedJob.textContent.includes('排队中'));
 check('排队中：不显示 0%', queuedJob && !queuedJob.textContent.includes('0%'));
 check('任务栏统计带排队数', $('#jobStat').textContent.includes('排队 1'), $('#jobStat').textContent);
+check('累计 300 MB 出现换 IP 提醒', $('#jobHint').hidden === false, String($('#jobHint').hidden));
+check('提醒里写明再往下换要续传', $('#jobHintText').textContent.includes('同名续传'), $('#jobHintText').textContent);
+$('#jobHintClose').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('点「知道了」收起提醒', $('#jobHint').hidden === true);
 
 // 删除文件：先确认，再发 file:delete
 click([...doneJob.querySelectorAll('button')].find((b) => b.textContent.includes('删除文件')));
@@ -275,6 +301,63 @@ const before = sent.filter((x) => x === 'file:delete').length;
 click([...doneJob.querySelectorAll('button')].find((b) => b.textContent.includes('删除记录')));
 await sleep(150);
 check('删除记录不发 file:delete', sent.filter((x) => x === 'file:delete').length === before);
+
+// 8.5 批量：勾选不限状态，按钮按状态给
+const jobOf = (n) => $$('#jobList .job').find((el) => el.textContent.includes(n));
+const boxOf = (n) => jobOf(n)?.querySelector('input.jsel');
+const markBox = (n, on) => {
+  const b = boxOf(n);
+  b.checked = on;
+  b.dispatchEvent(new window.Event('change', { bubbles: true }));
+};
+
+check('每个任务都有勾选框', $$('#jobList input.jsel').length === 5, String($$('#jobList input.jsel').length));
+check('没勾选时批量按钮全禁用',
+  $('#btnJobCancel').disabled && $('#btnJobForget').disabled && $('#btnJobDelete').disabled);
+
+// 只勾进行中的：能取消，不能删记录 / 删文件
+markBox('movie.mp4', true);
+await sleep(30);
+check('勾进行中：取消可用', $('#btnJobCancel').disabled === false);
+check('勾进行中：删记录禁用', $('#btnJobForget').disabled === true);
+check('勾进行中：删文件禁用', $('#btnJobDelete').disabled === true);
+check('勾选计数显示', $('#jobSelInfo').textContent.includes('已勾 1 / 5'), $('#jobSelInfo').textContent);
+
+click($('#btnJobCancel'));
+await sleep(150);
+check('批量取消发一条消息', sent.includes('jobs:cancel-many'));
+check('批量取消带对 gid', bulk.find((m) => m.gids)?.gids.includes('g1') === true,
+  JSON.stringify(bulk.at(-1)).slice(0, 120));
+
+// 勾两条已完成的：删文件才可用
+markBox('old.mp4', true);
+markBox('gone.mp4', true);
+await sleep(30);
+check('勾已完成：删文件可用', $('#btnJobDelete').disabled === false);
+check('勾已完成：取消已禁用', $('#btnJobCancel').disabled === true);
+click($('#btnJobDelete'));
+await sleep(200);
+check('批量删文件走 file:delete-many', sent.includes('file:delete-many'));
+const delMsg = bulk.filter((m) => m.paths).at(-1);
+check('批量删文件带两个路径', delMsg?.paths?.length === 2, JSON.stringify(delMsg).slice(0, 160));
+check('批量删文件后清记录', sent.includes('job:forget-many'));
+check('批量删除提示条数', $('#toast').textContent.includes('已删除 2 个文件'), $('#toast').textContent);
+
+// 全选 / 取消全选
+$('#jobSelAll').checked = true;
+$('#jobSelAll').dispatchEvent(new window.Event('change', { bubbles: true }));
+check('全选勾上每一行', $$('#jobList input.jsel').every((b) => b.checked));
+check('全选计数正确', $('#jobSelInfo').textContent.includes('已勾 5 / 5'), $('#jobSelInfo').textContent);
+$('#jobSelAll').checked = false;
+$('#jobSelAll').dispatchEvent(new window.Event('change', { bubbles: true }));
+check('取消全选清空', $$('#jobList input.jsel').every((b) => !b.checked));
+
+// 任务列表每秒刷新会重建 DOM，勾选必须撑过重建
+aria2TickOn = true;
+markBox('old.mp4', true);
+await sleep(1300);
+check('刷新重建后勾选还在', boxOf('old.mp4')?.checked === true);
+check('刷新重建后按钮仍可用', $('#btnJobForget').disabled === false);
 
 // 9. 筛选
 click($('#tabSniff'));
@@ -339,6 +422,7 @@ check('全选只勾中可下的那条', $('#batchSelInfo').textContent.includes(
 click($('#btnBatchDown'));
 await sleep(120);
 check('加入队列发出 batch:submit', sent.includes('batch:submit'));
+check('提交前弹出换 IP 提醒', confirms.some((c) => c.includes('出口 IP')), String(confirms.length));
 
 // 13. 勾选体验：全选 / 半选 / 手动改过就不再自动勾回
 scanExtra = true;                       // 扫出 4 条：/1 可下 /2 失效 /3 下架 /4 解析失败

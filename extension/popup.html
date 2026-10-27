@@ -49,9 +49,20 @@
   </section>
 
   <section id="paneJobs" class="pane" hidden>
+    <div id="jobHint" class="hint-bar" hidden>
+      <span id="jobHintText"></span>
+      <button id="jobHintClose" class="mini">知道了</button>
+    </div>
     <div class="toolbar">
       <span id="jobStat" class="hint"></span>
       <button id="btnJobRefresh" class="ghost" style="margin-left:auto">刷新</button>
+    </div>
+    <div class="bar-inline job-bar">
+      <label class="check"><input type="checkbox" id="jobSelAll" disabled><span>全选</span></label>
+      <button id="btnJobCancel" class="mini" disabled>取消所选</button>
+      <button id="btnJobForget" class="mini" disabled>删除记录</button>
+      <button id="btnJobDelete" class="mini danger" disabled>删除文件</button>
+      <span id="jobSelInfo" class="hint"></span>
     </div>
     <ul id="jobList" class="list"></ul>
     <div id="jobEmpty" class="empty"><p class="e-title">没有任务</p></div>

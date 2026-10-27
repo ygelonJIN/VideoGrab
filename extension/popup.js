@@ -10,6 +10,24 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
 
 const HELPER_CMD = 'cd "/Volumes/TUF ESD-T1A Media/视频下载器/helper" && ./start.sh';
 
+// 换 IP 的代价随已下量变大，所以提醒要前置：开始前说一次、下到 300 MB 再说一次，
+// 真慢了再说一次。阈值先写死，跑一阵再决定要不要进设置页。
+const IP_TIP = {
+  slowBps: 20 * 1024,          // 低于这个速度算"慢"
+  slowMs: 3 * 60 * 1000,       // 连续慢这么久才提示，避免刚起步误报
+  minBytesToTrack: 5 * 1024 * 1024,  // 已经下了 5 MB 才开始算慢，别拿 0 B/s 的起步阶段报警
+  earlyBytes: 300 * 1024 * 1024,     // 累计 300 MB 提前提醒：再往下换 IP 就要靠续传接
+  muteMs: 30 * 60 * 1000       // 点「知道了」后 30 分钟内不再弹
+};
+const IP_WARN = [
+  '这些直链绑定的是你当前的出口 IP。',
+  '',
+  '中途换代理节点，正在下的会全部 403 —— 文件不会丢，但要回页面重新解析，再用原文件名续传才能接上。',
+  '要换 IP 就现在换；已经开始之后换，代价只会越来越大。',
+  '',
+  '按当前节点开始下载？'
+].join('\n');
+
 const state = {
   tabId: null,
   items: [],
@@ -24,6 +42,14 @@ const state = {
   aria2Ok: null,
   helperOk: null,
   lastSig: '',
+  jobSig: '',            // 任务列表的内容签名：没变就不重排 DOM，免得每秒闪一下、勾选被打断
+  jobSel: new Set(),     // 'g:<gid>' / 'h:<id>'，批量操作靠它
+  jobRows: [],           // 当前列表的任务行（状态、路径），批量时按勾选查
+  ipBytes: 0,            // 本次累计下载量，用来提前提醒"现在换 IP 代价还小"
+  ipWarnedAt: 0,
+  ipHintMutedUntil: 0,
+  slowSince: new Map(),  // 任务键 → 首次低于阈值的时刻
+  lastRecv: new Map(),   // 任务键 → 上次收到的字节，用来算增量
   batchItems: [],
   batchSelected: new Set(),
   batchGroups: [],
@@ -51,6 +77,7 @@ async function init() {
   }
   await refreshList(true);
   await restoreBatchState();
+  await restoreIpHint();
   probeBackends();
   setInterval(tick, 1000);
 }
@@ -311,6 +338,7 @@ async function actAria2(items) {
   const files = items.filter((i) => !['HLS', 'DASH'].includes(i.kind));
   if (streams.length && !files.length) return toast('流请用「复制 ffmpeg 命令」或「交给助手」', true);
 
+  if (files.length && !await warnIpBind()) return;
   const r = await send('dl:aria2', { items: files });
   if (!r?.ok) return toast(r?.error || 'aria2 调用失败', true);
   if (r.gids?.length) {
@@ -352,6 +380,7 @@ async function actCopy(text, label = '链接') {
 }
 
 async function actHelper(item) {
+  if (!await warnIpBind()) return;
   const r = await send('helper:submit', {
     kind: item.kind, url: item.url, name: item.name, headers: item.headers
   });
@@ -403,6 +432,7 @@ async function refreshJobs() {
   const got = await chrome.storage.local.get('jobs');
   const aria2Jobs = (got.jobs || []).filter((j) => j.gid);
   const parts = [];
+  const rows = [];
   let queuedN = 0;
 
   if (aria2Jobs.length) {
@@ -412,7 +442,10 @@ async function refreshJobs() {
         const keep = aria2Jobs.filter((j) => !r.dead.includes(j.gid));
         await chrome.storage.local.set({ jobs: keep });
       }
-      for (const j of r.list) parts.push(aria2JobEl(j));
+      for (const j of r.list) {
+        rows.push(jobRowOf(j, 'aria2'));
+        parts.push(aria2JobEl(j));
+      }
       if (r.list.length) state.aria2Ok = true;
     } else state.aria2Ok = false;
   }
@@ -423,20 +456,232 @@ async function refreshJobs() {
       state.helperOk = true;
       for (const j of (h.data.jobs || [])) {
         if (j.status === 'queued') queuedN++;
+        rows.push(jobRowOf(j, 'helper'));
         parts.push(helperJobEl(j));
       }
     } else state.helperOk = false;
   } catch { state.helperOk = false; }
   updateHelperUI();
 
-  const list = $('#jobList');
-  list.innerHTML = '';
-  for (const el of parts) list.appendChild(el);
-  $('#jobEmpty').hidden = parts.length > 0;
-  const running = parts.filter((el) => el.classList.contains('running')).length;
-  $('#jobStat').textContent = parts.length
-    ? `共 ${parts.length} 个，进行中 ${running - queuedN}${queuedN ? `，排队 ${queuedN}` : ''}`
+  state.jobRows = rows;
+  // 每秒重建整张表有两个副作用：勾选被冲掉、点击被吃掉。内容没变就别动 DOM。
+  const sig = rows.map((r) => `${r.key}=${r.sig}`).join('|');
+  if (sig !== state.jobSig) {
+    state.jobSig = sig;
+    const list = $('#jobList');
+    list.innerHTML = '';
+    for (const el of parts) list.appendChild(el);
+    $('#jobEmpty').hidden = parts.length > 0;
+  }
+  const running = rows.filter((r) => r.running).length;
+  $('#jobStat').textContent = rows.length
+    ? `共 ${rows.length} 个，进行中 ${running - queuedN}${queuedN ? `，排队 ${queuedN}` : ''}`
     : '';
+  syncJobSel();
+  touchIpHint(rows);
+}
+
+// ------------------------------------------------------------------ 任务批量选择
+// 键分两种：aria2 用 gid，助手用 id，加前缀免得撞。
+function jobKeyOf(kind, id) {
+  return kind === 'aria2' ? `g:${id}` : `h:${id}`;
+}
+
+function jobRowOf(j, kind) {
+  const status = j.status || 'unknown';
+  const running = kind === 'aria2'
+    ? ['active', 'waiting', 'paused'].includes(status)
+    : ['running', 'queued'].includes(status);
+  const path = kind === 'aria2' ? (j.files?.[0]?.path || '') : (j.out || '');
+  return {
+    key: jobKeyOf(kind, kind === 'aria2' ? j.gid : j.id),
+    kind,
+    gid: j.gid,
+    id: j.id,
+    name: j.name || j.url || path,
+    status,
+    running,
+    path,
+    speed: Number(j.downloadSpeed ?? j.speed) || 0,
+    received: Number(j.completedLength ?? j.received) || 0,
+    sig: [status, running, j.completedLength, j.totalLength, j.downloadSpeed,
+      j.progress, j.exists, j.errorMessage || j.error || '', path].join('/')
+  };
+}
+
+function pickedJobRows() {
+  return state.jobRows.filter((r) => state.jobSel.has(r.key));
+}
+
+// 勾选框跟着 state 走：列表每秒重建，选择不能丢
+function jobSelHtml(key) {
+  return `<input type="checkbox" class="jsel" data-jkey="${esc(key)}"${state.jobSel.has(key) ? ' checked' : ''} title="选中后可批量处理">`;
+}
+
+function syncJobSel() {
+  const rows = state.jobRows;
+  const bar = $('#jobSelAll').closest('.job-bar');
+  if (bar) bar.hidden = rows.length === 0;   // 没有任务时别留一条全是灰按钮的空条
+  const alive = new Set(rows.map((r) => r.key));
+  for (const k of [...state.jobSel]) if (!alive.has(k)) state.jobSel.delete(k);
+  // 行内勾选框也对齐 state：批量取消后会从选择里清掉，DOM 不重建时也得看得见
+  for (const box of $('#jobList').querySelectorAll('input.jsel')) {
+    box.checked = state.jobSel.has(box.dataset.jkey);
+  }
+  const picked = pickedJobRows();
+  const all = rows.length > 0 && picked.length === rows.length;
+  const box = $('#jobSelAll');
+  box.disabled = rows.length === 0;
+  box.checked = all;
+  box.indeterminate = !all && picked.length > 0;
+  $('#jobSelInfo').textContent = picked.length ? `已勾 ${picked.length} / ${rows.length}` : '';
+  $('#btnJobCancel').disabled = !picked.some((r) => r.running);
+  $('#btnJobForget').disabled = !picked.some((r) => !r.running);
+  $('#btnJobDelete').disabled = !picked.some((r) => !r.running && r.path);
+}
+
+// ---------------------------------------------------------------- 换 IP 提醒
+// 票绑出口 IP，换了节点旧链接全 403。提醒必须前置：开下之前一次、下到 300 MB 一次、
+// 真慢了再一次 —— 等到下了一大半才说，用户已经没有便宜的退出点了。
+async function restoreIpHint() {
+  try {
+    const got = await chrome.storage.session.get(['ipMeter', 'ipHintState']);
+    const m = got?.ipMeter;
+    if (m && Date.now() - (m.at || 0) < 12 * 3600 * 1000) state.ipBytes = Number(m.bytes) || 0;
+    const h = got?.ipHintState || {};
+    state.ipWarnedAt = Number(h.warnedAt) || 0;
+    state.ipHintMutedUntil = Number(h.mutedUntil) || 0;
+  } catch { /* session 读不到就当新会话 */ }
+}
+
+let ipMeterTimer = 0;
+function saveIpMeter() {
+  clearTimeout(ipMeterTimer);
+  ipMeterTimer = setTimeout(() => {
+    chrome.storage.session.set({ ipMeter: { bytes: state.ipBytes, at: Date.now() } }).catch(() => {});
+  }, 4000);
+}
+
+// 开下之前说清楚：同一个浏览器会话只说一次，不然每点一次都弹会很烦
+async function warnIpBind() {
+  if (Date.now() - state.ipWarnedAt < 12 * 3600 * 1000) return true;
+  if (!window.confirm(IP_WARN)) return false;
+  state.ipWarnedAt = Date.now();
+  try {
+    await chrome.storage.session.set({
+      ipHintState: { warnedAt: state.ipWarnedAt, mutedUntil: state.ipHintMutedUntil }
+    });
+  } catch { /* 忽略 */ }
+  return true;
+}
+
+// 累计量 + 低速计时。只在 refreshJobs 里跑，用了 session 存，弹窗关掉不丢
+function touchIpHint(rows) {
+  const now = Date.now();
+  let add = 0;
+  const alive = new Set(rows.map((r) => r.key));
+  for (const k of [...state.lastRecv.keys()]) if (!alive.has(k)) state.lastRecv.delete(k);
+  for (const r of rows) {
+    const prev = state.lastRecv.get(r.key) || 0;
+    if (r.received > prev) add += r.received - prev;
+    state.lastRecv.set(r.key, r.received);
+  }
+  if (add > 0) { state.ipBytes += add; saveIpMeter(); }
+
+  for (const k of [...state.slowSince.keys()]) if (!alive.has(k)) state.slowSince.delete(k);
+  for (const r of rows) {
+    // 刚起步是 0 B/s，别拿这个报慢
+    const slow = r.running && r.received >= IP_TIP.minBytesToTrack && r.speed < IP_TIP.slowBps;
+    if (slow && !state.slowSince.has(r.key)) state.slowSince.set(r.key, now);
+    if (!slow) state.slowSince.delete(r.key);
+  }
+
+  const el = $('#jobHint');
+  if (!el) return;
+  const slowRow = rows.find((r) => r.running && state.slowSince.has(r.key)
+    && now - state.slowSince.get(r.key) >= IP_TIP.slowMs);
+  let text = '';
+  if (slowRow) {
+    text = `${slowRow.name || '任务'} 已连续 3 分钟低于 20 KB/s：多半是 CDN 对当前出口 IP 限速。`
+      + '换节点能提速，但换完旧链接会 403，要重新解析 + 原文件名续传。';
+  } else if (state.ipBytes >= IP_TIP.earlyBytes) {
+    text = `本次已下 ${humanBytes(state.ipBytes)}：现在换 IP 代价还小；`
+      + '再往下换，已下的部分就要重新解析 + 同名续传才能接上。';
+  }
+  el.hidden = !text || now < state.ipHintMutedUntil;
+  if (text) $('#jobHintText').textContent = text;
+}
+
+function muteIpHint() {
+  state.ipHintMutedUntil = Date.now() + IP_TIP.muteMs;
+  try {
+    chrome.storage.session.set({
+      ipHintState: { warnedAt: state.ipWarnedAt, mutedUntil: state.ipHintMutedUntil }
+    }).catch(() => {});
+  } catch { /* 忽略 */ }
+  const el = $('#jobHint');
+  if (el) el.hidden = true;
+}
+
+// 批量取消：进行中的任务，一次消息处理一批，别一条任务发一次
+async function bulkCancelJobs() {
+  const rows = pickedJobRows().filter((r) => r.running);
+  if (!rows.length) return toast('选中的任务都不在下，没什么可取消的', true);
+  if (!window.confirm(`取消 ${rows.length} 个正在下载的任务？\n已经下到磁盘的部分会留着。`)) return;
+  const r = await send('jobs:cancel-many', {
+    gids: rows.filter((x) => x.kind === 'aria2').map((x) => x.gid),
+    ids: rows.filter((x) => x.kind === 'helper').map((x) => x.id)
+  });
+  if (!r?.ok) return toast(r?.error || '取消失败', true);
+  for (const x of rows) state.jobSel.delete(x.key);
+  const bad = r.failed?.length || 0;
+  toast(`已取消 ${r.canceled || 0} 个${bad ? `，${bad} 个没能取消` : ''}`, bad > 0);
+  refreshJobs();
+}
+
+// 清记录：先让 aria2 / 助手忘掉，再从 storage 里批量抹掉
+async function forgetJobRows(rows) {
+  if (!rows.length) return false;
+  const gids = rows.filter((x) => x.kind === 'aria2').map((x) => x.gid);
+  const r = await send('job:forget-many', {
+    gids,
+    ids: rows.filter((x) => x.kind === 'helper').map((x) => x.id)
+  });
+  if (!r?.ok) { toast(r?.error || '删除记录失败', true); return false; }
+  await dropJobRecords(gids);
+  for (const x of rows) state.jobSel.delete(x.key);
+  return true;
+}
+
+async function bulkForgetJobs() {
+  const picked = pickedJobRows();
+  const rows = picked.filter((r) => !r.running);
+  if (!rows.length) return toast('进行中的任务先「取消所选」，再删记录', true);
+  const tail = picked.length > rows.length ? `\n其中有 ${picked.length - rows.length} 条正在下载，会跳过。` : '';
+  if (!window.confirm(`删除 ${rows.length} 条任务记录？\n只清列表，磁盘上的文件不动。${tail}`)) return;
+  if (!await forgetJobRows(rows)) return;
+  toast(`已删除 ${rows.length} 条记录，文件还在`);
+  refreshJobs();
+}
+
+async function bulkDeleteFiles() {
+  const picked = pickedJobRows();
+  const rows = picked.filter((r) => !r.running && r.path);
+  if (!rows.length) return toast('选中的任务没有可删的文件（进行中的先取消）', true);
+  const preview = rows.slice(0, 5).map((r) => r.name || r.path).join('\n');
+  const more = rows.length > 5 ? `\n…共 ${rows.length} 个` : '';
+  if (!window.confirm(`从磁盘删除 ${rows.length} 个文件？\n${preview}${more}\n\n删了就找不回来了。`)) return;
+  const paths = [...new Set(rows.map((r) => r.path))];
+  const r = await send('file:delete-many', { paths });
+  if (!r?.ok) return toast(r?.error || '删除失败', true);
+  const okPaths = new Set(r.deletedPaths || []);
+  const done = rows.filter((x) => okPaths.has(x.path));
+  await forgetJobRows(done);
+  const bad = r.failed?.length || 0;
+  toast(bad
+    ? `删掉 ${done.length} 个，${bad} 个失败：${r.failed[0].error}`
+    : `已删除 ${done.length} 个文件`, bad > 0);
+  refreshJobs();
 }
 
 function pct(job) {
@@ -488,6 +733,7 @@ function aria2JobEl(j) {
 
   el.innerHTML = `
     <div class="j-top">
+      ${jobSelHtml(jobKeyOf('aria2', j.gid))}
       <span class="badge k-${esc(j.kind || 'MP4')}">aria2</span>
       <span class="j-name" title="${esc(name)}">${esc(name)}</span>
       ${ops}
@@ -525,6 +771,7 @@ function helperJobEl(j) {
 
   el.innerHTML = `
     <div class="j-top">
+      ${jobSelHtml(jobKeyOf('helper', j.id))}
       <span class="badge k-HLS">助手</span>
       <span class="j-name" title="${esc(j.name || '')}">${esc(j.name || j.url)}</span>
       ${ops}
@@ -773,6 +1020,7 @@ async function resolveBatch(retryFailed = false) {
 async function submitBatch() {
   const items = state.batchItems.filter((i) => i.status === 'ok' && state.batchSelected.has(i.url));
   if (!items.length) return toast('没有勾选「可下」的条目');
+  if (!await warnIpBind()) return;
   const btn = $('#btnBatchDown');
   btn.disabled = true;
   try {
@@ -927,6 +1175,25 @@ function bindEvents() {
   $('#btnOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
   $('#btnRefresh').addEventListener('click', () => refreshList(true));
   $('#btnJobRefresh').addEventListener('click', () => refreshJobs());
+  $('#jobHintClose').addEventListener('click', muteIpHint);
+  $('#jobList').addEventListener('change', (e) => {
+    const box = e.target.closest('input.jsel');
+    if (!box) return;
+    if (box.checked) state.jobSel.add(box.dataset.jkey);
+    else state.jobSel.delete(box.dataset.jkey);
+    syncJobSel();
+  });
+  $('#jobSelAll').addEventListener('change', (e) => {
+    const on = e.target.checked;
+    if (on) for (const r of state.jobRows) state.jobSel.add(r.key);
+    else state.jobSel.clear();
+    // 先在 DOM 上同步，别等下一次 refreshJobs（期间可能被点）
+    for (const box of $('#jobList').querySelectorAll('input.jsel')) box.checked = on;
+    syncJobSel();
+  });
+  $('#btnJobCancel').addEventListener('click', bulkCancelJobs);
+  $('#btnJobForget').addEventListener('click', bulkForgetJobs);
+  $('#btnJobDelete').addEventListener('click', bulkDeleteFiles);
   $('#btnClear').addEventListener('click', async () => {
     await send('media:clear', { tabId: state.tabId });
     state.selected.clear();
@@ -1031,11 +1298,17 @@ async function onListClick(e) {
   return openDetail(item);
 }
 
-async function dropJobRecord(gid) {
+async function dropJobRecords(gids) {
+  if (!gids?.length) return;
   try {
     const got = await chrome.storage.local.get('jobs');
-    await chrome.storage.local.set({ jobs: (got.jobs || []).filter((j) => j.gid !== gid) });
+    const set = new Set(gids);
+    await chrome.storage.local.set({ jobs: (got.jobs || []).filter((j) => !set.has(j.gid)) });
   } catch { /* 忽略 */ }
+}
+
+async function dropJobRecord(gid) {
+  return dropJobRecords([gid]);
 }
 
 async function deleteAria2File(gid, path, name) {

@@ -52,6 +52,7 @@ window.chrome = {
           { gid: 'g2', name: 'old.mp4', kind: 'MP4', status: 'complete', totalLength: 734003200, completedLength: 734003200, downloadSpeed: 0, connections: 0, errorMessage: '', exists: true, files: [{ path: '/Users/x/Downloads/VideoGrab/old.mp4' }] },
           { gid: 'g3', name: 'gone.mp4', kind: 'MP4', status: 'complete', totalLength: 300, completedLength: 300, downloadSpeed: 0, connections: 0, errorMessage: '', exists: false, files: [{ path: '/Users/x/Downloads/VideoGrab/gone.mp4' }] }
         ] };
+        case 'helper:submit': return on ? { ok: true } : { ok: false, error: '助手没在运行（127.0.0.1:8765 连不上）' };
         case 'batch:history': return { ok: true, history: {} };
         case 'batch:scan': return { ok: true, helperDown: !on, scan: { source: on ? 'dom' : 'local', listing: [{ template: 'site.com/watch/:id', count: 3, items: [
           { url: 'https://site.com/watch/101', label: '第 01 集' },
@@ -70,7 +71,19 @@ window.chrome = {
   },
   storage: {
     local: { get: async () => ({ jobs: [{ gid: 'g1', name: 'movie.mp4', kind: 'MP4', ts: 1 }] }), set: async () => {} },
-    session: { get: async () => ({}), set: async () => {} }
+    // 预置 320 MB：任务面板截图里要能看到「现在换 IP 代价还小」那条提示
+    session: {
+      get: async (k) => {
+        const keys = Array.isArray(k) ? k : [k];
+        const out = {};
+        for (const key of keys) {
+          if (key === 'ipMeter') out.ipMeter = { bytes: 320 * 1024 * 1024, at: Date.now() };
+          if (key === 'ipHintState') out.ipHintState = {};
+        }
+        return out;
+      },
+      set: async () => {}
+    }
   },
   tabs: {
     query: async () => [{ id: 7, url: 'https://site.com/watch' }],
@@ -121,6 +134,8 @@ for (const st of STATES) {
     execFileSync(CHROME, [
       '--headless=new', '--disable-gpu', '--hide-scrollbars',
       '--no-sandbox', '--disable-crash-reporter', '--disable-breakpad',
+      // 截图固定浅色：README 里的图要一致，不能跟着生成时系统的深浅色变
+      '--blink-settings=preferredColorScheme=1',
       `--user-data-dir=${path.join(TMP, 'profile-' + st.name)}`,
       '--window-size=560,600', '--virtual-time-budget=6000',
       `--screenshot=${out}`, `file://${file}`
