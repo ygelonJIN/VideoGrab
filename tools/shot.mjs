@@ -59,11 +59,16 @@ window.chrome = {
           { url: 'https://site.com/watch/102', label: '第 02 集' },
           { url: 'https://site.com/watch/103', label: '第 03 集' }
         ] }] } };
-        case 'batch:resolve': return on ? { ok: true, items: (msg.urls || []).map((u, i) => (
-          i === 0 ? { url: u, ok: true, title: '第 01 集', media: { url: 'https://cdn/v/a.mp4', kind: 'MP4', size: 1610612736 } }
-            : i === 1 ? { url: u, ok: false, unavailable: true, reason: '播放器里没有媒体配置' }
-              : { url: u, ok: false, gone: true, reason: 'HTTP 404' }
-        )) } : { ok: false, error: '助手没在运行（127.0.0.1:8765 连不上）' };
+        case 'batch:resolve': {
+          if (window.__flags.resolveDelay) {
+            await new Promise((r) => setTimeout(r, window.__flags.resolveDelay));
+          }
+          return on ? { ok: true, items: (msg.urls || []).map((u, i) => (
+            i === 0 ? { url: u, ok: true, title: '第 01 集', media: { url: 'https://cdn/v/a.mp4', kind: 'MP4', size: 1610612736 } }
+              : i === 1 ? { url: u, ok: false, unavailable: true, reason: '播放器里没有媒体配置' }
+                : { url: u, ok: false, gone: true, reason: 'HTTP 404' }
+          )) } : { ok: false, error: '助手没在运行（127.0.0.1:8765 连不上）' };
+        }
         default: return { ok: true };
       }
     },
@@ -107,6 +112,13 @@ const STATES = [
   {
     name: 'batch',
     after: `setTimeout(() => { document.querySelector('#tabBatch').click(); document.querySelector('#btnScan').click(); }, 300);`
+  },
+  {
+    // 解析卡在第一批上，900 ms 时点「停止解析」：拍下来就是「已停止」的样子
+    name: 'batch-stopped',
+    after: `window.__flags.resolveDelay = 4000;
+            setTimeout(() => { document.querySelector('#tabBatch').click(); document.querySelector('#btnScan').click(); }, 300);
+            setTimeout(() => { document.querySelector('#btnResolve').click(); }, 900);`
   },
   {
     name: 'batch-offline',

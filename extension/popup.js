@@ -791,7 +791,9 @@ const BATCH_STATUS = {
   ok: { label: '可下', cls: 'b-ok' },
   gone: { label: '已下架', cls: 'b-gone' },
   unavailable: { label: '源已失效', cls: 'b-gone' },
-  failed: { label: '解析失败', cls: 'b-fail' }
+  failed: { label: '解析失败', cls: 'b-fail' },
+  // 用户叫停的，不是失败也不是待办：自动续解析只捡 pending，所以停下来的不会再自己跑
+  stopped: { label: '已停止', cls: 'b-stop' }
 };
 
 // 弹窗一关内存就没了，而解析一页要几十秒 —— 结果必须落到 session 里
@@ -931,31 +933,76 @@ async function scanPage() {
 }
 
 let resolving = false;
+// 用户按了停止 / 终止：这一轮不再发下一批。结果回来也只回填还停在 pending 的条目，
+// 所以「终止」能真的掐掉正在飞的那一批，不会过一秒又自己接着跑。
+let resolveStop = false;
 
-async function resolveBatch(retryFailed = false) {
+const BATCH_CHUNK = 5;   // 5 条一批：能边解析边出结果，弹窗中途关了也只丢最后一批
+
+function countBatch(s) {
+  return state.batchItems.filter((i) => i.status === s).length;
+}
+
+// 汇总条：解析完、停完都要说清每种状态各剩多少，别把「已停止」吞进失败里
+function batchSummary() {
+  const n = countBatch;
+  return [
+    n('ok') ? `可下 ${n('ok')}` : '',
+    n('unavailable') ? `源失效 ${n('unavailable')}` : '',
+    n('gone') ? `已下架 ${n('gone')}` : '',
+    n('failed') ? `失败 ${n('failed')}` : '',
+    n('pending') ? `待解析 ${n('pending')}` : '',
+    n('stopped') ? `已停止 ${n('stopped')}` : ''
+  ].filter(Boolean).join(' · ');
+}
+
+// 终止：勾中的（或全部）待解析条目转成「已停止」。
+// 只停勾中的时候不动正在跑的那一轮 —— 它下一批现取 pending，跳过的就是这几条，其余照常解析。
+function stopBatchParsing({ selectedOnly = false } = {}) {
+  let n = 0;
+  for (const it of state.batchItems) {
+    if (it.status !== 'pending') continue;
+    if (selectedOnly && !state.batchSelected.has(it.url)) continue;
+    it.status = 'stopped';
+    it.reason = '';
+    n++;
+  }
+  if (!n) {
+    toast(selectedOnly ? '勾中的条目没有在等解析的' : '没有在解析的条目', true);
+    return 0;
+  }
+  // 只有「全部停止」才是刹车；终止所选不该顺手把没勾的也一起掐了
+  if (resolving && !selectedOnly) resolveStop = true;
+  renderBatch();
+  saveBatchState();
+  toast(selectedOnly ? `已终止 ${n} 条解析，点「继续解析」能接上` : `已停止，${n} 条转成「已停止」`);
+  return n;
+}
+
+async function resolveBatch({ revive = '' } = {}) {
   if (resolving) return;
-  if (retryFailed) {
+  if (revive) {
+    // 按钮当时写的是哪件事就只干哪件，别顺手把别的状态也一起翻上来
+    const from = revive === 'all' ? ['failed', 'stopped'] : [revive];
     for (const it of state.batchItems) {
-      if (it.status === 'failed') { it.status = 'pending'; it.reason = ''; }
+      if (from.includes(it.status)) { it.status = 'pending'; it.reason = ''; }
     }
     renderBatch();
   }
-  const pending = state.batchItems.filter((i) => i.status === 'pending');
-  if (!pending.length) return toast('没有待解析的条目');
+  if (!countBatch('pending')) return toast('没有待解析的条目');
 
   resolving = true;
-  const btnResolve = $('#btnResolve');
-  const btnScan = $('#btnScan');
-  btnResolve.disabled = true;
-  btnScan.disabled = true;
+  resolveStop = false;
+  renderBatch();          // 按钮这一刻变成「停止解析」
 
   try {
-    // 5 条一批：能边解析边出结果，弹窗中途关了也只丢最后一批
-    const CHUNK = 5;
-    for (let i = 0; i < pending.length; i += CHUNK) {
-      const chunk = pending.slice(i, i + CHUNK);
+    let done = 0;
+    while (!resolveStop) {
+      const queue = state.batchItems.filter((i) => i.status === 'pending');
+      if (!queue.length) break;
+      const chunk = queue.slice(0, BATCH_CHUNK);
       $('#batchHint').textContent =
-        `解析中 ${i + 1}~${Math.min(i + CHUNK, pending.length)} / ${pending.length} …`;
+        `解析中 ${done + 1}~${done + chunk.length} / ${done + queue.length} … 点「停止解析」随时能停`;
 
       let r;
       try {
@@ -974,11 +1021,13 @@ async function resolveBatch(retryFailed = false) {
           toast(err, true);
           break;
         }
-        // 这一批失败不影响后面的批次
+        // 这一批失败不影响后面的批次；飞在路上时被终止的不算失败
         for (const it of chunk) {
+          if (it.status !== 'pending') continue;
           it.status = 'failed';
           it.reason = err.slice(0, 120);
         }
+        done += chunk.length;
         renderBatch();
         await saveBatchState();
         continue;
@@ -986,6 +1035,7 @@ async function resolveBatch(retryFailed = false) {
 
       const byUrl = new Map((r.items || []).map((x) => [x.url, x]));
       for (const it of chunk) {
+        if (it.status !== 'pending') continue;   // 这一批飞在路上时被终止了
         const got = byUrl.get(it.url);
         if (!got) { it.status = 'failed'; it.reason = '没有返回结果'; continue; }
         it.media = got.media || null;
@@ -995,6 +1045,7 @@ async function resolveBatch(retryFailed = false) {
         // 用户手动改过勾选就不再强行自动勾，不然刚取消的又会被后解析出来的带上去
         if (got.ok && !state.batchSelTouched) state.batchSelected.add(it.url);
       }
+      done += chunk.length;
       renderBatch();
       await saveBatchState();
     }
@@ -1003,14 +1054,15 @@ async function resolveBatch(retryFailed = false) {
     toast(e?.message || '解析失败', true);
   } finally {
     resolving = false;
-    btnResolve.disabled = false;
-    btnScan.disabled = false;
-    const n = (s) => state.batchItems.filter((i) => i.status === s).length;
+    resolveStop = false;
+    const pendingN = countBatch('pending');
+    const stoppedN = countBatch('stopped');
     if (state.batchItems.length) {
-      const left = n('pending');
-      $('#batchHint').textContent = (state.batchHelperDown && left)
-        ? `助手没开，还有 ${left} 条待解析：启动助手后点「解析剩余 ${left} 条」`
-        : `可下 ${n('ok')} · 源失效 ${n('unavailable')} · 已下架 ${n('gone')} · 失败 ${n('failed')}`;
+      $('#batchHint').textContent = (state.batchHelperDown && pendingN)
+        ? `助手没开，还有 ${pendingN} 条待解析：启动助手后点「解析剩余 ${pendingN} 条」`
+        : [batchSummary(),
+            pendingN ? '点「解析剩余」接着跑' : stoppedN ? '停掉的条目点「继续解析」能接上' : ''
+          ].filter(Boolean).join('。');
     }
     renderBatch();
     await saveBatchState();
@@ -1052,21 +1104,29 @@ function renderBatch() {
   const rows = state.batchItems;
   $('#batchEmpty').hidden = rows.length > 0;
 
-  const pendingN = rows.filter((i) => i.status === 'pending').length;
-  const failedN = rows.filter((i) => i.status === 'failed').length;
+  const pendingN = countBatch('pending');
+  const stoppedN = countBatch('stopped');
+  const failedN = countBatch('failed');
   const btnR = $('#btnResolve');
   if (!rows.length) {
     btnR.textContent = '解析条目';
     btnR.disabled = true;
     btnR.title = '先扫描本页';
+  } else if (resolving) {
+    // 解析跑起来以后，这个按钮就是唯一的刹车
+    btnR.textContent = '停止解析';
+    btnR.disabled = false;
+    btnR.title = '停掉这一轮：没解析的转成「已停止」，不会再自动跑';
   } else {
     // 按钮要自己说清楚还剩什么活，别停在一个和现状对不上的名字上
-    btnR.textContent = resolving ? '解析中'
-      : pendingN ? `解析剩余 ${pendingN} 条`
+    btnR.textContent = pendingN ? `解析剩余 ${pendingN} 条`
+      : stoppedN ? `继续解析 ${stoppedN} 条`
         : failedN ? `重试失败 ${failedN} 条`
           : '全部已解析';
-    btnR.disabled = resolving || (!pendingN && !failedN);
-    btnR.title = failedN && !pendingN ? '把解析失败的条目再试一遍' : '把还没解析的条目解析出直链';
+    btnR.disabled = !pendingN && !stoppedN && !failedN;
+    btnR.title = pendingN ? '把还没解析的条目解析出直链'
+      : stoppedN ? '把停掉的条目接着解析，已解析好的不动'
+        : failedN ? '把解析失败的条目再试一遍' : '';
   }
   $('#btnScan').disabled = resolving;
 
@@ -1078,16 +1138,16 @@ function renderBatch() {
     if (it.local === 'running') chips.push('<span class="chip b-pending">下载中</span>');
     const size = it.media?.size ? humanBytes(it.media.size) : '';
 
-    const pickable = it.status === 'ok';
-    const why = pickable ? '' :
-      it.status === 'pending' ? 'title="解析完才能勾选"' : 'title="这条没有可下地址"';
+    // 勾选框对所有条目开放：可下的进下载队列，待解析/失败的进「终止所选」
+    const why = it.status === 'ok' ? 'title="勾上后可加入下载队列"'
+      : it.status === 'pending' || it.status === 'failed' ? 'title="勾上后可「终止所选」，不再解析"'
+        : 'title="勾上只影响批量操作，这条没有可下地址"';
 
     const li = document.createElement('li');
     li.className = 'row batch';
     li.dataset.url = it.url;
     li.innerHTML = `
-      <input type="checkbox" class="bsel" ${state.batchSelected.has(it.url) ? 'checked' : ''}
-        ${pickable ? '' : 'disabled'} ${why}>
+      <input type="checkbox" class="bsel" ${state.batchSelected.has(it.url) ? 'checked' : ''} ${why}>
       <div class="main">
         <div class="title"><span class="name" title="${esc(labelOf(it))}">${esc(labelOf(it))}</span></div>
         <div class="sub">
@@ -1111,14 +1171,16 @@ function syncBatchSelUI() {
     if (box && !box.disabled) box.checked = state.batchSelected.has(li.dataset.url);
   }
   const selAll = $('#batchSelAll');
-  const picked = state.batchSelected.size;
-  // 没有「可下」的时候，全选框要自己说明不能点，否则就是个死控件
-  selAll.disabled = okAll === 0;
-  selAll.checked = okAll > 0 && picked === okAll;
-  selAll.indeterminate = picked > 0 && picked < okAll;
-  selAll.title = okAll === 0 ? (rows.length ? '这一页没有可下的条目' : '先扫描本页') : '全选可下的条目';
-  $('#batchSelInfo').textContent = rows.length ? `已勾 ${picked} / 可下 ${okAll} 条` : '';
-  $('#btnBatchDown').disabled = picked === 0;
+  const picked = rows.filter((i) => state.batchSelected.has(i.url));
+  // 全选按整页算：勾上待解析的条目就是为了「终止所选」
+  selAll.disabled = rows.length === 0;
+  selAll.checked = rows.length > 0 && picked.length === rows.length;
+  selAll.indeterminate = picked.length > 0 && picked.length < rows.length;
+  selAll.title = rows.length ? '全选这一页的条目（可下的会一起进下载队列）' : '先扫描本页';
+  $('#batchSelInfo').textContent = rows.length ? `已勾 ${picked.length} / ${rows.length}，可下 ${okAll}` : '';
+  // 两个按钮各管各的：能下的进队列，还在排队的才能终止
+  $('#btnBatchDown').disabled = !picked.some((i) => i.status === 'ok');
+  $('#btnBatchStop').disabled = !picked.some((i) => i.status === 'pending' || i.status === 'failed');
 }
 
 // ------------------------------------------------------------------ 事件
@@ -1127,8 +1189,14 @@ function bindEvents() {
   $('#tabJobs').addEventListener('click', () => switchPane('jobs'));
   $('#tabBatch').addEventListener('click', () => switchPane('batch'));
   $('#btnScan').addEventListener('click', scanPage);
-  // 点按钮 = 把待解析和失败的都再跑一遍（自动续解析只捡 pending）
-  $('#btnResolve').addEventListener('click', () => resolveBatch(true));
+  // 按钮当时写的是哪件事就干哪件；解析跑起来以后它就是刹车
+  $('#btnResolve').addEventListener('click', () => {
+    if (resolving) return stopBatchParsing();
+    if (countBatch('pending')) return resolveBatch();
+    if (countBatch('stopped')) return resolveBatch({ revive: 'stopped' });
+    return resolveBatch({ revive: 'failed' });
+  });
+  $('#btnBatchStop').addEventListener('click', () => stopBatchParsing({ selectedOnly: true }));
   $('#btnBatchDown').addEventListener('click', submitBatch);
   $('#btnBatchRefresh').addEventListener('click', async () => {
     await loadBatchLocal();
@@ -1147,7 +1215,7 @@ function bindEvents() {
   $('#batchSelAll').addEventListener('change', (e) => {
     state.batchSelTouched = true;
     if (e.target.checked) {
-      for (const i of state.batchItems) if (i.status === 'ok') state.batchSelected.add(i.url);
+      for (const i of state.batchItems) state.batchSelected.add(i.url);
     } else {
       state.batchSelected.clear();
     }

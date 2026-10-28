@@ -50,6 +50,9 @@ const bulk = [];         // 批量消息原文，用来断言 gid / path 传对�
 const downloads = [];
 let helperOnline = true;
 let scanExtra = false;   // 扫出 4 条（多一条 /4），用来测全选/半选和重试
+let scanMany = false;    // 扫出 8 条（两批），用来测解析途中的「停止解析」
+let resolveDelay = 0;    // 让 batch:resolve 慢一点，好在中途点刹车
+const scanN = () => (scanMany ? 8 : scanExtra ? 4 : 3);
 let resolve4Ok = false;  // /4 第一次解析失败，重试才成功
 let aria2Tick = 0;       // 打开后才每查一次涨一点：逼任务列表真的重建，验证勾选能撑过重建
 let aria2TickOn = false;
@@ -101,16 +104,17 @@ function makeChrome() {
               source: helperOnline ? 'dom' : 'local', title: '列表',
               listing: [{
                 template: 'site.com/watch/:id',
-                count: scanExtra ? 4 : 3,
-                items: (scanExtra ? [1, 2, 3, 4] : [1, 2, 3]).map((n) => (
-                  { url: `https://site.com/watch/${n}`, label: '' }
+                count: scanN(),
+                items: Array.from({ length: scanN() }, (_, i) => (
+                  { url: `https://site.com/watch/${i + 1}`, label: '' }
                 ))
               }],
-              total: scanExtra ? 4 : 3
+              total: scanN()
             }
           };
           case 'batch:resolve': {
             if (!helperOnline) return { ok: false, error: '助手没在运行（127.0.0.1:8765 连不上）' };
+            if (resolveDelay) await sleep(resolveDelay);
             return {
               ok: true,
               items: (msg.urls || []).map((u) => (
@@ -133,7 +137,7 @@ function makeChrome() {
             };
           }
           case 'batch:history': return { ok: true, history: {} };
-          case 'batch:submit': return { ok: true, jobs: [{ id: 'j1', name: 'A' }], errors: [], history: {} };
+          case 'batch:submit': bulk.push(msg); return { ok: true, jobs: [{ id: 'j1', name: 'A' }], errors: [], history: {} };
           case 'jobs:cancel-many':
             bulk.push(msg);
             return { ok: true, canceled: (msg.gids?.length || 0) + (msg.ids?.length || 0), failed: [] };
@@ -411,17 +415,20 @@ check('第 1 条可下', brows[0].textContent.includes('可下'));
 check('第 2 条源已失效', brows[1].textContent.includes('源已失效'));
 check('第 3 条已下架', brows[2].textContent.includes('已下架'));
 check('可下的勾选框能点', brows[0].querySelector('.bsel').disabled === false);
-check('失效的勾选框禁用', brows[1].querySelector('.bsel').disabled === true);
+check('失效的也能勾（只为批量操作）', brows[1].querySelector('.bsel').disabled === false);
 check('有可下项后全选可用', $('#batchSelAll').disabled === false);
 
 $('#batchSelAll').checked = true;
 $('#batchSelAll').dispatchEvent(new window.Event('change', { bubbles: true }));
 await sleep(60);
-check('全选只勾中可下的那条', $('#batchSelInfo').textContent.includes('已勾 1'), $('#batchSelInfo').textContent);
+check('全选勾上整页', $('#batchSelInfo').textContent.includes('已勾 3 / 3'), $('#batchSelInfo').textContent);
+check('全选也会说明可下几条', $('#batchSelInfo').textContent.includes('可下 1'), $('#batchSelInfo').textContent);
 
 click($('#btnBatchDown'));
 await sleep(120);
 check('加入队列发出 batch:submit', sent.includes('batch:submit'));
+check('只把可下的 1 条提交', bulk.filter((m) => m.items).at(-1)?.items?.length === 1,
+  JSON.stringify(bulk.filter((m) => m.items).at(-1)).slice(0, 120));
 check('提交前弹出换 IP 提醒', confirms.some((c) => c.includes('出口 IP')), String(confirms.length));
 
 // 13. 勾选体验：全选 / 半选 / 手动改过就不再自动勾回
@@ -434,8 +441,7 @@ check('重新扫描出 4 条', brows2.length === 4, String(brows2.length));
 check('解析失败单独标出来', brows2[3].textContent.includes('解析失败'), brows2[3].textContent.slice(0, 60));
 check('按钮文案跟着剩余走', $('#btnResolve').textContent.includes('重试失败'), $('#btnResolve').textContent);
 check('可下自动勾上', brows2[0].querySelector('.bsel').checked === true);
-check('全选跟着打勾', $('#batchSelAll').checked === true);
-check('全选不是半选', $('#batchSelAll').indeterminate === false);
+check('只自动勾可下的，全选处于半选', $('#batchSelAll').checked === false && $('#batchSelAll').indeterminate === true);
 
 let boxN = (n) => $$('#batchList li.row')[n].querySelector('.bsel');
 boxN(0).checked = false;
@@ -455,11 +461,65 @@ check('计数没被带跑', $('#batchSelInfo').textContent.includes('已勾 0'),
 $('#batchSelAll').checked = true;
 $('#batchSelAll').dispatchEvent(new window.Event('change', { bubbles: true }));
 await sleep(40);
-check('全选能重新勾全', $('#batchSelInfo').textContent.includes('已勾 2'), $('#batchSelInfo').textContent);
+check('全选能重新勾全', $('#batchSelInfo').textContent.includes('已勾 4 / 4'), $('#batchSelInfo').textContent);
 boxN(3).checked = false;
 boxN(3).dispatchEvent(new window.Event('change', { bubbles: true }));
 await sleep(40);
 check('取消一条进半选', $('#batchSelAll').indeterminate === true && $('#batchSelAll').checked === false);
+
+// 13.5 解析途中能停：按钮变刹车，停下的转「已停止」，再点就是「继续解析」
+scanMany = true;                        // 8 条 = 两批，第一批还在飞的时候点停止
+resolve4Ok = true;                      // 这一轮 /4 也成功：8 条里 5 条可下
+resolveDelay = 400;
+click($('#btnScan'));
+await sleep(250);
+check('解析中按钮变「停止解析」', $('#btnResolve').textContent === '停止解析', $('#btnResolve').textContent);
+check('解析中按钮能点（就是刹车）', $('#btnResolve').disabled === false);
+check('解析中扫描按钮禁用', $('#btnScan').disabled === true);
+check('解析中提示条教怎么停', $('#batchHint').textContent.includes('停止解析'), $('#batchHint').textContent);
+
+click($('#btnResolve'));
+await sleep(300);                       // 让飞在半路的那一批回来，确认不会被回填
+check('停止后全部转「已停止」', $$('#batchList .chip.b-stop').length === 8,
+  $$('#batchList .chip.b-stop').length + ' 条已停止');
+check('停止后不再有待解析', $$('#batchList .chip.b-pending').length === 0,
+  $$('#batchList .chip.b-pending').length + ' 条待解析');
+check('停止后按钮写「继续解析」', $('#btnResolve').textContent.includes('继续解析 8 条'), $('#btnResolve').textContent);
+check('停止会提示一句', $('#toast').textContent.includes('已停止'), $('#toast').textContent);
+check('提示条说清已停止几条', $('#batchHint').textContent.includes('已停止 8'), $('#batchHint').textContent);
+
+resolveDelay = 0;
+click($('#btnResolve'));                // 继续解析这 8 条
+await sleep(500);
+check('继续解析把停掉的接上', $$('#batchList .chip.b-stop').length === 0,
+  $$('#batchList .chip.b-stop').length + ' 条还是已停止');
+check('继续解析出全部结果', $$('#batchList .chip.b-ok').length === 6,
+  $$('#batchList .chip.b-ok').length + ' 条可下');
+
+// 13.6 解析途中「终止所选」：只停勾中的，没勾的照常解析完
+scanMany = true;
+resolve4Ok = true;
+resolveDelay = 350;
+click($('#btnScan'));
+await sleep(200);                       // 第一批刚飞出去
+const tickRow = (n) => {
+  const b = $$('#batchList li.row')[n].querySelector('.bsel');
+  b.checked = true;
+  b.dispatchEvent(new window.Event('change', { bubbles: true }));
+};
+tickRow(0); tickRow(1);
+await sleep(40);
+click($('#btnBatchStop'));
+await sleep(900);                       // 两批都跑完
+check('只停勾中的两条', $$('#batchList .chip.b-stop').length === 2,
+  $$('#batchList .chip.b-stop').length + ' 条已停止');
+check('没勾的照常解析完', $$('#batchList .chip.b-pending').length === 0,
+  $$('#batchList .chip.b-pending').length + ' 条待解析');
+check('其余条目拿到结果', $$('#batchList .chip.b-ok').length === 5,
+  $$('#batchList .chip.b-ok').length + ' 条可下');
+check('按钮写「继续解析 2 条」', $('#btnResolve').textContent.includes('继续解析 2'), $('#btnResolve').textContent);
+resolveDelay = 0;
+scanMany = false;
 
 // 14. 助手没开：批量照样列得出条目，引导卡和弹层都在
 helperOnline = false;
@@ -471,7 +531,26 @@ check('没解析的保持待解析', $$('#batchList .chip.b-pending').length ===
 check('批量页引导卡出现', $('#batchGuide').hidden === false);
 check('提示说清助手没开', $('#batchHint').textContent.includes('助手没开'), $('#batchHint').textContent);
 check('解析按钮写明剩余', $('#btnResolve').textContent.includes('解析剩余'), $('#btnResolve').textContent);
-check('没开助手勾选框仍禁用', $$('#batchList .bsel').every((b) => b.disabled === true));
+check('没开助手也能勾选（为了终止）', $$('#batchList .bsel').every((b) => b.disabled === false));
+
+// 终止所选：只停勾中的，没勾的还排着队
+const pickRow = (n) => {
+  const b = $$('#batchList li.row')[n].querySelector('.bsel');
+  b.checked = true;
+  b.dispatchEvent(new window.Event('change', { bubbles: true }));
+};
+pickRow(0); pickRow(1);
+await sleep(40);
+check('勾待解析后「终止所选」可用', $('#btnBatchStop').disabled === false);
+check('勾待解析后「加入下载队列」禁用', $('#btnBatchDown').disabled === true);
+click($('#btnBatchStop'));
+await sleep(80);
+check('终止所选只停勾中的两条', $$('#batchList .chip.b-stop').length === 2,
+  $$('#batchList .chip.b-stop').length + ' 条已停止');
+check('没勾的仍在待解析', $$('#batchList .chip.b-pending').length === 2,
+  $$('#batchList .chip.b-pending').length + ' 条待解析');
+check('终止后按钮写「解析剩余 2 条」', $('#btnResolve').textContent.includes('解析剩余 2'), $('#btnResolve').textContent);
+check('终止提示写明条数', $('#toast').textContent.includes('已终止 2 条'), $('#toast').textContent);
 
 click($('#btnResolve'));
 await sleep(200);

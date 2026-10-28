@@ -89,9 +89,10 @@
       <button id="btnExport" class="ghost">导出链接</button>
     </div>
     <div id="batchHint" class="hint"></div>
-    <div class="bar-inline">
-      <label class="check"><input type="checkbox" id="batchSelAll" disabled><span>全选可用</span></label>
+    <div class="bar-inline batch-bar">
+      <label class="check"><input type="checkbox" id="batchSelAll" disabled><span>全选</span></label>
       <span id="batchSelInfo" class="hint"></span>
+      <button id="btnBatchStop" class="mini" disabled>终止所选</button>
       <button id="btnBatchDown" class="primary">加入下载队列</button>
     </div>
     <ul id="batchList" class="list"></ul>

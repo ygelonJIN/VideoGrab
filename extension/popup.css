@@ -428,6 +428,12 @@ kbd {
   background: color-mix(in srgb, var(--amber) 15%, transparent); color: var(--amber);
   border-color: color-mix(in srgb, var(--amber) 25%, transparent);
 }
+/* 已停止：用户自己叫停的，既不是失败也不是待办，用虚线圈出来跟「待解析」分开 */
+.chip.b-stop {
+  background: transparent; color: var(--muted);
+  border-color: color-mix(in srgb, var(--muted) 40%, transparent);
+  border-style: dashed;
+}
 .chip.b-saved {
   background: var(--accent-soft); color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 22%, transparent);
@@ -470,6 +476,11 @@ kbd {
 .job-bar { flex-wrap: wrap; padding: 0 14px 8px; }
 .job-bar button { margin-left: 0; }
 .job-bar #jobSelInfo { margin-left: auto; }
+
+/* 批量页这条同款：计数自己撑开，页面窄了按钮折行也不挤 */
+.batch-bar { flex-wrap: wrap; padding: 0 14px 8px; }
+.batch-bar button { margin-left: 0; }
+.batch-bar #batchSelInfo { margin-left: auto; }
 
 .job .jsel {
   flex: none; width: 15px; height: 15px; margin: 0;
