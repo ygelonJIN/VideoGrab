@@ -7,7 +7,9 @@
  * 用法：node tools/selftest.mjs
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -341,6 +343,81 @@ const css = fs.readFileSync(path.join(EXT, 'popup.css'), 'utf8');
 check('popup.css 有空状态 [hidden] 规则', css.includes('.empty[hidden]'));
 check('popup.css 有 pane [hidden] 规则', css.includes('.pane[hidden]'));
 check('popup.css 有 toast [hidden] 规则', css.includes('.toast[hidden]'));
+
+// ---------------------------------------------------------------- 4. 容器体检 / 修复
+const K = await import(path.join(ROOT, 'helper', 'container.mjs'));
+
+const box = (type, payload) => {
+  const h = Buffer.alloc(8);
+  h.writeUInt32BE(8 + payload.length, 0);
+  h.write(type, 4, 'latin1');
+  return Buffer.concat([h, payload]);
+};
+
+const ftypBox = box('ftyp', Buffer.from('isom\0\0\0\0isom', 'latin1'));
+const plain = Buffer.concat([ftypBox, box('moov', box('mvhd', Buffer.alloc(96))), box('mdat', Buffer.alloc(1000))]);
+const s1 = K.scanContainerBytes(plain);
+check('普通 MP4 不算分片', s1.fragmented === false, JSON.stringify(s1));
+check('普通 MP4 索引在头', s1.moovFront === true);
+check('普通 MP4 品牌读得出', s1.brand === 'isom', s1.brand);
+
+const frag = Buffer.concat([
+  ftypBox,
+  box('moov', Buffer.concat([box('mvhd', Buffer.alloc(96)), box('mvex', box('trex', Buffer.alloc(24)))])),
+  box('moof', box('mfhd', Buffer.alloc(8))),
+  box('mdat', Buffer.alloc(500))
+]);
+const s2 = K.scanContainerBytes(frag);
+check('分片 MP4 认出 moof', s2.fragmented === true);
+check('分片 MP4 kind=fragmented', s2.kind === 'fragmented', s2.kind);
+check('只有 mvex 没有 moof 也判分片（初始化段）', (() => {
+  const init = Buffer.concat([ftypBox, box('moov', box('mvex', box('trex', Buffer.alloc(24)))), box('mdat', Buffer.alloc(64))]);
+  return K.scanContainerBytes(init).fragmented === true;
+})());
+
+const tailCase = Buffer.concat([ftypBox, box('mdat', Buffer.alloc(200)), box('moov', box('mvhd', Buffer.alloc(96)))]);
+const tailLen = 112;                                  // moov 正好 112 字节
+const headLen = tailCase.length - tailLen;
+const s3 = K.scanContainerBytes(tailCase.subarray(0, headLen), tailCase.subarray(headLen), tailCase.length);
+check('moov 在尾部能认出来', s3.kind === 'moov-tail' && s3.moovFront === false, JSON.stringify(s3));
+
+// 真 ffmpeg 生成的样本：验证「分片 → 修复 → 普通 MP4」整条链路
+const hasFfmpeg = (() => { try { return spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0; } catch { return false; } })();
+if (!hasFfmpeg) {
+  console.log('（没装 ffmpeg，跳过修复的端到端用例）');
+} else {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-fix-'));
+  const sample = path.join(tmp, 'frag.mp4');
+  const gen = spawnSync('ffmpeg', [
+    '-v', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10:duration=1',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+    '-c:v', 'libx264', '-c:a', 'aac', '-shortest',
+    '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', sample
+  ], { encoding: 'utf8' });
+  check('能生成分片 MP4 样本', gen.status === 0, String(gen.stderr || '').slice(0, 160));
+
+  if (gen.status === 0) {
+    const before = await K.scanContainerFile(sample);
+    check('真样本被判为分片', before.fragmented === true);
+
+    const r = await K.repairContainer(sample, { ffmpeg: 'ffmpeg', timeoutMs: 60000 });
+    const after = await K.scanContainerFile(sample);
+    check('修复返回 repaired', r.action === 'repaired', r.action);
+    check('修复后不再是分片', after.fragmented === false);
+    check('修复后索引在文件头', after.moovFront === true);
+
+    const dur = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', sample], { encoding: 'utf8' });
+    check('修复后时长不变', Math.abs(Number(dur.stdout.trim()) - 1) < 0.25, dur.stdout.trim());
+
+    const again = await K.repairContainer(sample, { ffmpeg: 'ffmpeg', timeoutMs: 60000 });
+    check('结构正常时不动文件', again.action === 'none', again.action);
+
+    const stray = fs.readdirSync(tmp).filter((n) => n.startsWith('.vg-fix-'));
+    check('修复不留临时文件', stray.length === 0, stray.join(','));
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
 
 // ---------------------------------------------------------------- 结果
 console.log(results.join('\n'));

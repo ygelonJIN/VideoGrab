@@ -14,6 +14,7 @@
       <button id="tabSniff" class="tab active" data-pane="sniff">嗅探<b id="cnt"></b></button>
       <button id="tabJobs" class="tab" data-pane="jobs">任务</button>
       <button id="tabBatch" class="tab" data-pane="batch">批量</button>
+      <button id="tabRepair" class="tab" data-pane="repair">修复</button>
     </nav>
     <button id="helperStatus" class="status" title="本地助手（127.0.0.1:8765），点开看怎么启动">
       <span class="dot"></span><span id="helperStatusText">助手 检测中</span>
@@ -99,6 +100,25 @@
     <div id="batchEmpty" class="empty">
       <p class="e-title">还没扫描</p>
       <p class="sub">在视频列表页点「扫描本页」，不用点开任何视频</p>
+    </div>
+  </section>
+
+  <section id="paneRepair" class="pane" hidden>
+    <div class="hint-bar">
+      <span>有些下载来的 MP4 是<b>分片结构</b>（fMP4，HLS 直接拼出来的）：<b>QuickTime / 预览打不开</b>，黑屏或卡 0:00，VLC 却能放。
+        修复 = 把碎片索引合并成普通 MP4，<b>只重封装、不重新编码</b>，画质不变；失败时原文件一个字节都不动。</span>
+    </div>
+    <div class="toolbar">
+      <button id="btnRepairScan" class="primary">扫描下载目录</button>
+      <button id="btnRepairPick" class="ghost" title="不在 ~/Downloads、桌面、影片里的文件用这个：会弹出 macOS 选择框，挑完直接开修">选择文件</button>
+      <button id="btnRepairAll" class="ghost" disabled>修复所有分片</button>
+      <button id="btnRepairHistory" class="ghost" style="margin-left:auto">最近修复</button>
+    </div>
+    <div id="repairHint" class="hint"></div>
+    <ul id="repairList" class="list"></ul>
+    <div id="repairEmpty" class="empty">
+      <p class="e-title">还没扫描</p>
+      <p class="sub">点「扫描下载目录」，列出 ~/Downloads、桌面、影片里的视频，并标出哪些需要修复</p>
     </div>
   </section>
 </div>

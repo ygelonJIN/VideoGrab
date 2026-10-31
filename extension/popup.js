@@ -45,6 +45,8 @@ const state = {
   jobSig: '',            // 任务列表的内容签名：没变就不重排 DOM，免得每秒闪一下、勾选被打断
   jobSel: new Set(),     // 'g:<gid>' / 'h:<id>'，批量操作靠它
   jobRows: [],           // 当前列表的任务行（状态、路径），批量时按勾选查
+  repairItems: null,     // 「修复」页扫出来的本地视频；null = 还没扫过
+  repairBusy: false,
   ipBytes: 0,            // 本次累计下载量，用来提前提醒"现在换 IP 代价还小"
   ipWarnedAt: 0,
   ipHintMutedUntil: 0,
@@ -423,6 +425,49 @@ function pathOps(p) {
           <button class="mini" data-copypath="${esc(p)}">复制路径</button>`;
 }
 
+// 有些下载来的 MP4 是「分片 MP4」（fMP4，HLS 直接拼接的产物）：每段样本的索引
+// 散在各自的 moof 碎片里，moov 只剩初始化信息。ffmpeg 系播放器能边读边建表，
+// 但 QuickTime / 预览 / Safari 读不出样本 —— 表现就是双击没反应、黑屏、卡 0:00。
+// 修 = 把碎片索引合并回一张完整 stbl 并前移 moov，只重封装不重编码。
+const FIX_TIP = '分片 MP4（HLS 拼接产物）把索引放在碎片里，QuickTime / 预览读不出来，只有 VLC 之类能放。\n'
+  + '修复 = 用 ffmpeg 把碎片索引合并成普通 MP4，只重封装、不重新编码：\n'
+  + '· 画质不变，体积基本不变（差几 MB 的索引）\n'
+  + '· 失败时原文件一个字节都不动\n'
+  + '· 大文件要几十秒，期间请别关这个窗口';
+
+// 正在修复的路径：任务面板每秒重建，按钮状态得靠这个记。
+// 修复期间只把按钮置灰，不写「修复中…」也不刷进度 —— 跑完一条 toast 报结果就够了
+const fixing = new Set();
+
+function fixBtn(p) {
+  if (!/\.(mp4|m4v|mov)$/i.test(String(p || ''))) return '';
+  const busy = fixing.has(String(p));
+  return `<button class="mini" data-fix="${esc(p)}"${busy ? ' disabled' : ''} title="${esc(FIX_TIP)}">修复容器</button>`;
+}
+
+async function fixContainer(p, btn) {
+  const key = String(p);
+  if (fixing.has(key) || !btn || btn.disabled) return;
+  fixing.add(key);
+  btn.disabled = true;
+  try {
+    const r = await send('file:fix', { path: p });
+    if (!r?.ok) { toast(r?.error || '修复失败，原文件没动', true); return; }
+    if (r.action === 'none') {
+      toast('结构正常，不用修：索引已经在文件头');
+    } else {
+      const why = r.before && r.before.kind === 'fragmented' ? '原本是分片 MP4，' : '';
+      toast(`已修复：${why}${humanBytes(r.size)}，用时 ${((r.ms || 0) / 1000).toFixed(1)} 秒，QuickTime 能播了`);
+    }
+  } catch (e) {
+    toast(e?.message || '修复失败，原文件没动', true);
+  } finally {
+    fixing.delete(key);
+    if (state.pane === 'repair') scanRepair();
+    else refreshJobs();
+  }
+}
+
 async function revealFile(p) {
   const r = await send('file:reveal', { path: p });
   if (!r?.ok) toast(r?.error || '打不开这个位置', true);
@@ -727,6 +772,7 @@ function aria2JobEl(j) {
            <button class="mini" data-job="${esc(j.gid)}" data-op="remove">取消</button>`;
   } else {
     ops = `${pathOps(filePath)}
+           ${!missing ? fixBtn(filePath) : ''}
            ${filePath ? `<button class="mini danger" data-del="${esc(filePath)}" data-gid="${esc(j.gid)}" data-name="${esc(name)}">删除文件</button>` : ''}
            <button class="mini" data-forget="${esc(j.gid)}">删除记录</button>`;
   }
@@ -766,6 +812,7 @@ function helperJobEl(j) {
   const ops = running
     ? `<button class="mini" data-hjob="${esc(j.id)}" data-op="cancel">取消</button>`
     : `${pathOps(j.out)}
+       ${!missing ? fixBtn(j.out) : ''}
        <button class="mini danger" data-hdel="${esc(j.out || '')}" data-hid="${esc(j.id)}" data-name="${esc(j.name || '')}">删除文件</button>
        <button class="mini" data-hforget="${esc(j.id)}">删除记录</button>`;
 
@@ -782,6 +829,117 @@ function helperJobEl(j) {
     ${missing ? '<div class="j-err">本地文件已经不在了。直链会过期，要重下请到「批量」页重新解析。</div>' : ''}
     ${j.error ? `<div class="j-err">${esc(j.error)}</div>` : ''}`;
   return el;
+}
+
+// ------------------------------------------------------------------ 修复（已有文件）
+// 任务面板的那个「修复容器」只认当前任务列表；这里直接扫本地目录，跟下载记录无关，
+// 老片子、别的工具下的、早就从列表里清掉的，都能在这儿修。
+function repairRowEl(f) {
+  const el = document.createElement('li');
+  const bad = Boolean(f.fragmented);
+  el.className = `job ${bad ? 'warn' : 'done'}`;
+
+  const name = String(f.path).split('/').pop();
+  const meta = [];
+  if (f.size) meta.push(humanBytes(f.size));
+  if (f.error) meta.push(`读不出来：${f.error}`);
+  else if (bad) meta.push('分片 MP4：QuickTime 打不开');
+  else if (f.kind === 'moov-tail') meta.push('索引在尾部（能播，只是边下边播不友好）');
+  else meta.push('结构正常，不用修');
+
+  const ops = bad ? `<button class="mini" data-fix="${esc(f.path)}">修复</button>` : '';
+
+  el.innerHTML = `
+    <div class="j-top">
+      <span class="badge k-MP4">MP4</span>
+      <span class="j-name" title="${esc(f.path)}">${esc(name)}</span>
+      ${ops}
+    </div>
+    <div class="j-meta">${meta.map(esc).join('<i>·</i>')}</div>
+    ${pathLine(f.path)}`;
+  return el;
+}
+
+function renderRepair() {
+  const items = state.repairItems || [];
+  const list = $('#repairList');
+  list.innerHTML = '';
+  for (const f of items) list.appendChild(repairRowEl(f));
+  $('#repairEmpty').hidden = items.length > 0;
+  const bad = items.filter((x) => x.fragmented).length;
+  $('#btnRepairAll').disabled = bad === 0 || state.repairBusy;
+  if (state.repairBusy) return;
+  if (state.repairItems === null) $('#repairHint').textContent = '';
+  else if (!items.length) $('#repairHint').textContent = '这几个目录里没有视频；别处的文件用「选择文件…」';
+  else $('#repairHint').textContent = bad
+    ? `共 ${items.length} 个，其中 ${bad} 个是分片 MP4，需要修复`
+    : `共 ${items.length} 个，都是正常 MP4`;
+}
+
+async function scanRepair() {
+  if (state.repairBusy) return;
+  $('#repairHint').textContent = '扫描中…';
+  const r = await send('file:scan', {});
+  if (!r?.ok) {
+    state.repairItems = null;
+    renderRepair();
+    $('#repairHint').textContent = r?.error || '扫描失败：助手没开？';
+    return;
+  }
+  state.repairItems = r.items || [];
+  renderRepair();
+}
+
+async function repairAllFragmented() {
+  const todo = (state.repairItems || []).filter((x) => x.fragmented);
+  if (!todo.length || state.repairBusy) return;
+  state.repairBusy = true;
+  $('#btnRepairScan').disabled = true;
+  $('#btnRepairPick').disabled = true;
+  // 跑的时候只置灰，不写「修复中 i/N」；结果全跑完一条 toast 说完
+  for (const b of $('#repairList').querySelectorAll('button[data-fix]')) b.disabled = true;
+  let ok = 0;
+  let fail = 0;
+  for (const f of todo) {
+    fixing.add(String(f.path));
+    const r = await send('file:fix', { path: f.path });
+    fixing.delete(String(f.path));
+    if (r?.ok) ok++; else fail++;
+  }
+  state.repairBusy = false;
+  $('#btnRepairScan').disabled = false;
+  $('#btnRepairPick').disabled = false;
+  toast(fail
+    ? `修复完成：成功 ${ok} 个，失败 ${fail} 个（失败的原文件没动）`
+    : `修复完成：${ok} 个文件现在 QuickTime 能播了`, fail > 0);
+  await scanRepair();
+}
+
+async function pickRepairFiles() {
+  if (state.repairBusy) return;
+  // 系统选择框会抢焦点，Chrome 会把弹窗关掉；所以挑完由助手直接开修，结果记在最近修复里
+  toast('在弹出的窗口里挑文件；挑完这个面板会关，修复在后台继续');
+  const r = await send('file:repair-pick', {});
+  if (r?.canceled) return;
+  if (!r?.ok) return toast(r?.error || '修复失败', true);
+  const results = r.results || [];
+  const done = results.filter((x) => x.ok && x.action === 'repaired').length;
+  toast(`修好 ${done} 个（共 ${results.length} 个）`);
+  scanRepair();
+}
+
+async function showRepairHistory() {
+  const r = await send('file:repairs');
+  if (!r?.ok) return toast(r?.error || '拿不到记录', true);
+  const items = (r.items || []).slice(0, 8);
+  if (!items.length) return toast('还没有修复记录');
+  const lines = items.map((x) => {
+    const name = String(x.path).split('/').pop();
+    if (x.action === 'error') return `${name}：失败（${x.error}）`;
+    if (x.action === 'none') return `${name}：结构正常，没动`;
+    return `${name}：已修复 ${humanBytes(x.size || 0)} / ${((x.ms || 0) / 1000).toFixed(1)} 秒`;
+  });
+  window.alert(`最近修复\n\n${lines.join('\n')}`);
 }
 
 // ------------------------------------------------------------------ 批量
@@ -1188,6 +1346,11 @@ function bindEvents() {
   $('#tabSniff').addEventListener('click', () => switchPane('sniff'));
   $('#tabJobs').addEventListener('click', () => switchPane('jobs'));
   $('#tabBatch').addEventListener('click', () => switchPane('batch'));
+  $('#tabRepair').addEventListener('click', () => switchPane('repair'));
+  $('#btnRepairScan').addEventListener('click', scanRepair);
+  $('#btnRepairPick').addEventListener('click', pickRepairFiles);
+  $('#btnRepairAll').addEventListener('click', repairAllFragmented);
+  $('#btnRepairHistory').addEventListener('click', showRepairHistory);
   $('#btnScan').addEventListener('click', scanPage);
   // 按钮当时写的是哪件事就干哪件；解析跑起来以后它就是刹车
   $('#btnResolve').addEventListener('click', () => {
@@ -1308,6 +1471,8 @@ function bindEvents() {
 
   $('#list').addEventListener('click', onListClick);
   $('#jobList').addEventListener('click', onJobClick);
+  // 「修复」页的行内按钮走同一套 data-* 处理；漏了这一行，那颗「修复」就是死的
+  $('#repairList').addEventListener('click', onJobClick);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.close(); });
 }
 
@@ -1423,6 +1588,7 @@ async function onJobClick(e) {
   if (b.dataset.forget) return forgetAria2(b.dataset.forget);
   if (b.dataset.hdel) return deleteHelperFile(b.dataset.hid, b.dataset.hdel, b.dataset.name);
   if (b.dataset.hforget) return forgetHelper(b.dataset.hforget);
+  if (b.dataset.fix) return fixContainer(b.dataset.fix, b);
 
   if (b.dataset.job) {
     const r = await send('aria2:op', { gid: b.dataset.job, op: b.dataset.op });
@@ -1453,12 +1619,16 @@ function switchPane(pane) {
   $('#paneSniff').hidden = pane !== 'sniff';
   $('#paneJobs').hidden = pane !== 'jobs';
   $('#paneBatch').hidden = pane !== 'batch';
+  $('#paneRepair').hidden = pane !== 'repair';
   $('#bar').style.display = pane === 'sniff' ? '' : 'none';
   $('#tabSniff').classList.toggle('active', pane === 'sniff');
   $('#tabJobs').classList.toggle('active', pane === 'jobs');
   $('#tabBatch').classList.toggle('active', pane === 'batch');
+  $('#tabRepair').classList.toggle('active', pane === 'repair');
   if (pane === 'jobs') refreshJobs();
   if (pane === 'batch' && state.batchItems.length) { loadBatchLocal().then(renderBatch); }
+  // 进「修复」页不自动扫：目录里几百个视频要转一遍，不该由切页签触发；
+  // 想扫就点「扫描下载目录」
 }
 
 function openHelperSheet() {

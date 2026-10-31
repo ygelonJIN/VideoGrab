@@ -600,6 +600,36 @@ async function handle(msg) {
       if (r && r.ok === false) throw new Error(r.error || '打开失败');
       return { opened: true };
     }
+    // 容器修复：分片 MP4 → 普通 MP4，只重封装不重编码。大文件要几十秒，超时给足
+    case 'file:fix': {
+      const s = await getSettings();
+      const r = await helperCall(s, '/api/file/repair', {
+        method: 'POST',
+        body: JSON.stringify({ path: msg.path })
+      }, 600000);
+      if (r && r.ok === false) throw new Error(r.error || '修复失败');
+      return r;
+    }
+    // 「修复」页：扫下载目录里已有的视频，标出哪些是分片结构
+    case 'file:scan': {
+      const s = await getSettings();
+      const r = await helperCall(s, '/api/file/scan', {
+        method: 'POST',
+        body: JSON.stringify({ paths: msg.paths || [] })
+      }, 60000);
+      return r;
+    }
+    // 「选择文件…」：原生对话框 + 直接开修。弹窗会被系统对话框抢焦点而关掉，
+    // 所以整个动作在助手那边跑完，结果落在 /api/file/repairs 里
+    case 'file:repair-pick': {
+      const s = await getSettings();
+      const r = await helperCall(s, '/api/file/repair-pick', { method: 'POST', body: '{}' }, 1800000);
+      return r;
+    }
+    case 'file:repairs': {
+      const s = await getSettings();
+      return await helperCall(s, '/api/file/repairs', {}, 6000);
+    }
     case 'job:forget': {
       const s = await getSettings();
       try { await aria2Call(s, 'aria2.removeDownloadResult', [msg.gid], 4000); } catch { /* 已经不在列表里也无所谓 */ }

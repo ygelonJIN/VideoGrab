@@ -53,6 +53,12 @@ window.chrome = {
           { gid: 'g3', name: 'gone.mp4', kind: 'MP4', status: 'complete', totalLength: 300, completedLength: 300, downloadSpeed: 0, connections: 0, errorMessage: '', exists: false, files: [{ path: '/Users/x/Downloads/VideoGrab/gone.mp4' }] }
         ] };
         case 'helper:submit': return on ? { ok: true } : { ok: false, error: '助手没在运行（127.0.0.1:8765 连不上）' };
+        case 'file:scan': return { ok: true, total: 3, fragmented: 1, items: [
+          { path: '/Users/x/Downloads/合集.mp4', size: 4415522090, kind: 'fragmented', fragmented: true },
+          { path: '/Users/x/Downloads/第01集.mp4', size: 734003200, kind: 'normal', fragmented: false },
+          { path: '/Users/x/Downloads/老片子.mp4', size: 1395864371, kind: 'moov-tail', fragmented: false }
+        ] };
+        case 'file:repairs': return { ok: true, items: [] };
         case 'batch:history': return { ok: true, history: {} };
         case 'batch:scan': return { ok: true, helperDown: !on, scan: { source: on ? 'dom' : 'local', listing: [{ template: 'site.com/watch/:id', count: 3, items: [
           { url: 'https://site.com/watch/101', label: '第 01 集' },
@@ -131,6 +137,14 @@ const STATES = [
       window.__flags.helperOnline = false;
       const row = [...document.querySelectorAll('li.row')].find((r) => r.textContent.includes('HLS'));
       row.querySelector('[data-act="helper"]').click();
+    }, 300);`
+  },
+  {
+    // 「修复」页：进页不自动扫，点「扫描下载目录」才列出来，分片的那条才有修复按钮
+    name: 'repair',
+    after: `setTimeout(() => {
+      document.querySelector('#tabRepair').click();
+      document.querySelector('#btnRepairScan').click();
     }, 300);`
   }
 ];

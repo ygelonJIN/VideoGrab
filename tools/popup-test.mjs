@@ -47,6 +47,8 @@ const clipboard = [];
 const sent = [];
 const confirms = [];
 const bulk = [];         // 批量消息原文，用来断言 gid / path 传对了
+const fixCalls = [];     // 「修复」真实请求过的路径
+let fixDelay = 0;        // 让 file:fix 慢一点，好在修复中途检查按钮和文案
 const downloads = [];
 let helperOnline = true;
 let scanExtra = false;   // 扫出 4 条（多一条 /4），用来测全选/半选和重试
@@ -97,6 +99,23 @@ function makeChrome() {
             }
           };
           case 'cfg:get': return { ok: true, settings: {} };
+          case 'file:scan': return {
+            ok: true,
+            items: [
+              { path: '/Users/x/Downloads/broken.mp4', size: 1234567, fragmented: true, kind: 'fragmented' },
+              { path: '/Users/x/Downloads/good.mp4', size: 7654321, fragmented: false, kind: 'normal' }
+            ],
+            total: 2, fragmented: 1
+          };
+          case 'file:repairs': return { ok: true, items: [] };
+          case 'file:fix': {
+            fixCalls.push(msg.path);
+            if (fixDelay) await sleep(fixDelay);
+            return {
+              ok: true, action: 'repaired', size: 1234567, ms: 800,
+              before: { kind: 'fragmented' }
+            };
+          }
           case 'batch:scan': return {
             ok: true,
             helperDown: !helperOnline,
@@ -276,11 +295,14 @@ check('已完成：样式带 done', doneJob.classList.contains('done'));
 check('已完成：显示落盘路径', doneJob.textContent.includes('~/Downloads/VideoGrab/old.mp4'), doneJob.textContent.slice(0,120));
 check('已完成：有打开文件夹', doneJob.textContent.includes('打开文件夹'));
 check('已完成：有复制路径', doneJob.textContent.includes('复制路径'));
+check('已完成：有修复容器', doneJob.textContent.includes('修复容器'));
+check('修复按钮写明不重编码', [...doneJob.querySelectorAll('button')].some((b) => String(b.title || '').includes('不重新编码')));
 
 // 本地文件被删了：不能再显示"已完成"
 const goneJob = $$('#jobList .job').find((el) => el.textContent.includes('gone.mp4'));
 check('文件已删：不显示已完成', goneJob && !goneJob.textContent.includes('已完成'));
 check('文件已删：显示文件已删除', goneJob && goneJob.textContent.includes('文件已删除'));
+check('文件已删：没有修复容器', goneJob && !goneJob.textContent.includes('修复容器'));
 check('文件已删：样式带 warn', goneJob && goneJob.classList.contains('warn'));
 check('文件已删：不再挂绿条', goneJob && !goneJob.querySelector('.bar').classList.contains('done'));
 
@@ -568,6 +590,47 @@ await sleep(120);
 check('没开助手也能导出链接', downloads.length === dlBefore + 1, String(downloads.length));
 check('导出内容是链接清单', String(downloads.at(-1)?.url || '').includes(encodeURIComponent('site.com/watch')),
   String(downloads.at(-1)?.url || '').slice(0, 80));
+
+// 9. 修复页：进页不自动扫描；行内「修复」真的发请求；全程不写进度文案
+click($('#tabRepair'));
+await sleep(250);
+check('进修复页不自动扫描', !sent.includes('file:scan'), sent.join(','));
+check('没扫描时是空状态', $('#repairEmpty').hidden === false && $$('#repairList .job').length === 0);
+check('没扫描时「修复所有分片」禁用', $('#btnRepairAll').disabled === true);
+check('没扫描时不写「扫描中」', !$('#repairHint').textContent.includes('扫描中'), $('#repairHint').textContent);
+
+click($('#btnRepairScan'));
+await sleep(200);
+let repairRows = $$('#repairList .job');
+check('点「扫描下载目录」才列本地视频', repairRows.length === 2, String(repairRows.length));
+check('修复页标出分片文件', repairRows[0]?.textContent.includes('分片 MP4'), repairRows[0]?.textContent.slice(0, 80));
+check('修复页给分片文件修复按钮', repairRows[0]?.textContent.includes('修复'));
+check('修复页正常文件不给修复按钮', repairRows[1] && !repairRows[1].textContent.includes('修复'));
+check('修复页统计分片数', $('#repairHint').textContent.includes('1 个是分片'), $('#repairHint').textContent);
+
+const fixBtnEl = repairRows[0].querySelector('button[data-fix]');
+fixDelay = 300;
+click(fixBtnEl);
+await sleep(80);
+check('行内「修复」真的发出 file:fix', fixCalls.includes('/Users/x/Downloads/broken.mp4'), JSON.stringify(fixCalls));
+check('修复中按钮置灰', fixBtnEl.disabled === true);
+check('修复中不写「修复中…」', fixBtnEl.textContent.trim() === '修复' && !/修复中/.test($('#repairHint').textContent),
+  `${fixBtnEl.textContent} | ${$('#repairHint').textContent}`);
+check('修复中不刷进度 toast', !/正在|修复中/.test($('#toast').textContent), $('#toast').textContent);
+await sleep(400);
+check('修完给一条结果', $('#toast').textContent.includes('QuickTime'), $('#toast').textContent);
+check('修完自动重扫一遍', sent.filter((x) => x === 'file:scan').length === 2,
+  String(sent.filter((x) => x === 'file:scan').length));
+
+// 「修复所有分片」同样只置灰，不逐条写「修复中 i/N」
+fixDelay = 300;
+click($('#btnRepairAll'));
+await sleep(80);
+check('全部修复时扫描按钮置灰', $('#btnRepairScan').disabled === true);
+check('全部修复不写逐条进度', !/修复中/.test($('#repairHint').textContent), $('#repairHint').textContent);
+await sleep(500);
+fixDelay = 0;
+check('全部修复完报结果', $('#toast').textContent.includes('修复完成'), $('#toast').textContent);
 
 console.log(log.join('\n'));
 console.log(`\n通过 ${pass}，失败 ${fail}`);

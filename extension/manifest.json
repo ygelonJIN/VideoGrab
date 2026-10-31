@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "视频下载器 VideoGrab",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "嗅探页面里的 MP4 / M3U8 / DASH 等媒体，自动带上真实 Referer、UA、Cookie，一键交给 aria2 多线程或 ffmpeg 合并。",
   "minimum_chrome_version": "116",
   "background": {

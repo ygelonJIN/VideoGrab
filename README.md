@@ -128,9 +128,22 @@ launchctl load ~/Library/LaunchAgents/com.videograb.helper.plist
    - **换 IP 提醒**：点任何下载动作之前，会先告诉你「这些直链绑当前出口 IP，中途换节点会全部 403」；
      任务面板顶部还有一条提示：累计下到 300 MB 时提醒「现在换 IP 代价还小」，某个任务连续 3 分钟
      低于 20 KB/s 时提醒「多半是按 IP 限速，换节点要重新解析 + 同名续传」。
+   - **修复容器**：从 HLS 直接拼出来的 MP4 是分片结构（fMP4），QuickTime / 预览 / Safari 读不出画面（双击没反应、黑屏、卡 0:00），
+     VLC 这类播放器却能放。任务行上的「修复容器」用 ffmpeg 把碎片索引合并成普通 MP4：只重封装、不重编码，画质不变，
+     失败时原文件一个字节都不动。
    - 助手合并的任务同样是这一套；已完成但本地文件被你删了的，会显示「文件已删除」而不是「已完成」
 
 分片 `.ts` 默认折叠，设置里可以打开。
+
+9. **修复页（修已有的文件，跟下载记录无关）**：点顶部「修复」后是空列表，点 `扫描下载目录` 才去扫
+   `~/Downloads`、桌面、影片里的视频（切页签不会自己扫），每行标出「分片 MP4：QuickTime 打不开」或「结构正常」。
+   分片的点行内 `修复`，也可以 `修复所有分片` 一次跑完。修复期间按钮只置灰，不写「修复中」也不刷进度条，
+   跑完一条提示报结果（修了几个、失败的没动）。
+   不在这些目录里的文件用 `选择文件`（会弹 macOS 选择框，挑完直接修；弹窗会被系统对话框抢焦点关掉，修完重开看「最近修复」）。
+
+![修复](screenshots/repair.png)
+
+<sub>修复页：跟下载记录无关，扫的是本地目录；只有分片结构的那条才有「修复」按钮</sub>
 
 ---
 
@@ -145,7 +158,8 @@ extension/          Chrome 扩展（MV3）
   options.*         设置页
   icons/
 helper/             本地助手（Node，无依赖）
-  server.mjs        /api/health /api/parse /api/jobs /api/scan /api/resolve
+  server.mjs        /api/health /api/parse /api/jobs /api/scan /api/resolve /api/file/repair
+  container.mjs     MP4 容器体检 + 分片 MP4 重封装（纯逻辑，可单测）
   extract.mjs       通用媒体发现器（直出 / 打包配置 / 播放器嵌入），纯函数
   start.sh
   com.videograb.helper.plist
@@ -163,8 +177,8 @@ tools/              自测
 
 ```bash
 node tools/extract-test.mjs  # 47 项：通用发现器 + aria2 错误提取 + 文件名去重，全合成数据
-node tools/selftest.mjs      # 87 项：类型识别、m3u8、aria2 参数、ffmpeg 命令、嗅探逻辑、批量兜底、批量取消/清记录/删文件
-node tools/popup-test.mjs    # 132 项：列表渲染、详情、任务面板、批量删除、筛选、批量面板、勾选、停止/终止解析、助手引导
+node tools/selftest.mjs      # 102 项：类型识别、m3u8、aria2 参数、ffmpeg 命令、嗅探逻辑、批量兜底、批量取消/清记录/删文件、容器体检与修复
+node tools/popup-test.mjs    # 153 项：列表渲染、详情、任务面板（含修复容器）、修复页（不自动扫 / 行内修复真的发请求 / 不写进度）、批量删除、筛选、批量面板、勾选、停止/终止解析、助手引导
 node tools/shot.mjs          # 出图：screenshots/ 下的界面截图就是它生成的，改完全局样式先跑它看效果
 ```
 

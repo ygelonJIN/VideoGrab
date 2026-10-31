@@ -18,11 +18,12 @@ import { randomUUID } from 'node:crypto';
 import { discover, looksGone, groupDomLinks } from './extract.mjs';
 import { extractAria2Error, describeExit } from './errors.mjs';
 import { uniqueName, splitExt } from './naming.mjs';
+import { scanContainerFile, repairContainer, describeScan, cleanupStaleFixes } from './container.mjs';
 
 const PORT = Number(process.env.VG_PORT || 8765);
 const HOME = os.homedir();
 const DEFAULT_OUT = path.join(HOME, 'Desktop');
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const DEFAULT_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const CONCURRENCY = Number(process.env.VG_CONCURRENCY || 2);
@@ -58,6 +59,7 @@ function detectSystemProxy() {
 const jobs = new Map();      // id -> job
 const queue = [];
 let running = 0;
+let repairing = false;       // 修复是重 IO，一次只跑一个
 
 const which = (bin) => {
   const r = spawnSync('which', [bin], { encoding: 'utf8' });
@@ -817,9 +819,79 @@ function safeDeletePath(input, what = '删除') {
   return abs;
 }
 
+const VIDEO_RE = /\.(mp4|m4v|mov)$/i;
+const repairHistory = [];      // 最近修复过的文件，弹窗靠它显示"修好了没"
+
+function recordRepair(item) {
+  repairHistory.unshift({ at: now(), ...item });
+  if (repairHistory.length > 20) repairHistory.length = 20;
+}
+
+/** 下载目录里最近的视频，新的在前；只看一层，不递归 */
+function listVideos(dirs, limit = 200) {
+  const out = [];
+  for (const dir of dirs) {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isFile() || e.name.startsWith('.') || !VIDEO_RE.test(e.name)) continue;
+      const full = path.join(dir, e.name);
+      try {
+        const st = fs.statSync(full);
+        if (!st.size) continue;
+        out.push({ path: full, size: st.size, mtimeMs: st.mtimeMs });
+      } catch { /* 读不到就算了 */ }
+    }
+  }
+  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return out.slice(0, limit);
+}
+
+/**
+ * macOS 原生选择框。弹窗会因此失去焦点被 Chrome 关掉，所以挑完必须在这边
+ * 直接把修复跑完，结果留在 repairHistory 里，用户重新打开弹窗还能看到。
+ */
+function pickVideos() {
+  return new Promise((resolve) => {
+    const script = [
+      'try',
+      '  set theFiles to choose file with prompt "选择要修复的视频（可多选）" with multiple selections allowed',
+      'on error number -128',
+      '  return ""',
+      'end try',
+      'set out to ""',
+      'repeat with f in theFiles',
+      '  set out to out & (POSIX path of f) & linefeed',
+      'end repeat',
+      'return out'
+    ].join('\n');
+    const child = spawn('osascript', ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', () => resolve({ paths: [], canceled: true, error: 'osascript 不可用' }));
+    child.on('close', () => {
+      const paths = out.split('\n').map((s) => s.trim()).filter((p) => p && VIDEO_RE.test(p));
+      resolve({ paths, canceled: paths.length === 0, error: paths.length ? '' : err.trim() });
+    });
+  });
+}
+
+/** 修复一个文件并记一笔历史；失败也返回结构化结果 */
+async function doRepair(abs) {
+  try {
+    const r = await repairContainer(abs, { ffmpeg: FFMPEG, timeoutMs: 30 * 60 * 1000 });
+    recordRepair({ path: abs, action: r.action, ms: r.ms, size: r.size, before: r.before.kind, after: r.after.kind });
+    return { ok: true, path: abs, ...r, describe: describeScan(r.after) };
+  } catch (e) {
+    recordRepair({ path: abs, action: 'error', error: e?.message || String(e) });
+    return { ok: false, path: abs, error: e?.message || String(e) };
+  }
+}
+
 // 有 Origin 但不是扩展发来的，一律拒（浏览器会给网页带上自己的 Origin，伪造不了）
-function originAllowed(req) {
-  const o = req.headers.origin;
+function originAllowed(req) {  const o = req.headers.origin;
   if (!o) return true;                       // curl / 本地脚本
   return o.startsWith('chrome-extension://');
 }
@@ -862,7 +934,8 @@ const server = http.createServer(async (req, res) => {
         ok: true, version: VERSION, home: HOME, defaultOut: DEFAULT_OUT,
         ffmpeg: Boolean(FFMPEG), ffmpegPath: FFMPEG, ffprobe: Boolean(FFPROBE),
         aria2c: Boolean(ARIA2C), aria2cPath: ARIA2C,
-        curl: Boolean(CURL), concurrency: CONCURRENCY
+        curl: Boolean(CURL), concurrency: CONCURRENCY,
+        repair: Boolean(FFMPEG)
       });
     }
 
@@ -1030,6 +1103,88 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // 容器修复：把分片 MP4（HLS 直接拼接的产物）重封装成普通 MP4。
+    // 只动索引/容器，不重编码 —— 码流字节原样搬，画质和体积基本不变。
+    if (p === '/api/file/repair' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!body.path) return json(res, 400, { error: '缺 path' });
+      let abs;
+      try { abs = safeDeletePath(body.path, '修复'); } catch (e) { return json(res, 400, { error: e.message }); }
+      if (!FFMPEG) return json(res, 400, { error: '找不到 ffmpeg，先 brew install ffmpeg' });
+      if (!fs.existsSync(abs)) return json(res, 404, { error: '文件已经不在了' });
+      if (!VIDEO_RE.test(abs)) return json(res, 400, { error: '只处理 mp4 / m4v / mov' });
+      if (repairing) return json(res, 429, { error: '上一个修复还没跑完，等它结束再来' });
+      repairing = true;
+      try {
+        const r = await doRepair(abs);
+        return json(res, r.ok ? 200 : 500, r);
+      } finally {
+        repairing = false;
+      }
+    }
+
+    // 「修复」页：扫下载目录里已有的视频，直接标出哪些是分片结构
+    if (p === '/api/file/scan' && req.method === 'POST') {
+      const body = await readBody(req);
+      const picked = Array.isArray(body.paths) ? body.paths.filter((x) => typeof x === 'string' && x).slice(0, 50) : [];
+      let files;
+      if (picked.length) {
+        files = [];
+        for (const raw of picked) {
+          const abs = path.resolve(expandHome(raw));
+          // 只回答 home 和外接盘，别把它变成全盘探测工具
+          const allowed = abs.startsWith(HOME + path.sep) || abs.startsWith('/Volumes/');
+          if (!allowed || !VIDEO_RE.test(abs) || !fs.existsSync(abs)) continue;
+          files.push({ path: abs, size: 0, mtimeMs: 0 });
+        }
+      } else {
+        files = listVideos([DEFAULT_OUT, path.join(HOME, 'Downloads'), path.join(HOME, 'Movies')]);
+      }
+
+      const items = [];
+      for (const f of files) {
+        try {
+          const s = await scanContainerFile(f.path);
+          items.push({
+            path: f.path, size: s.size, kind: s.kind, fragmented: s.fragmented,
+            moovFront: s.moovFront, brand: s.brand, mtimeMs: f.mtimeMs, describe: describeScan(s)
+          });
+        } catch (e) {
+          items.push({ path: f.path, mtimeMs: f.mtimeMs, error: e?.message || String(e) });
+        }
+      }
+      return json(res, 200, {
+        ok: true,
+        items,
+        total: items.length,
+        fragmented: items.filter((x) => x.fragmented).length,
+        dirs: [DEFAULT_OUT, path.join(HOME, 'Downloads'), path.join(HOME, 'Movies')]
+      });
+    }
+
+    // 「选择文件…」：开 macOS 原生对话框，挑完直接在这边修完并记账
+    // （弹窗会因此被 Chrome 关掉，所以不能指望它还活着）
+    if (p === '/api/file/repair-pick' && req.method === 'POST') {
+      if (!FFMPEG) return json(res, 400, { error: '找不到 ffmpeg，先 brew install ffmpeg' });
+      if (repairing) return json(res, 429, { error: '上一个修复还没跑完，等它结束再来' });
+      repairing = true;
+      try {
+        const picked = await pickVideos();
+        if (!picked.paths.length) {
+          return json(res, 200, { ok: true, canceled: true, results: [], error: picked.error || '' });
+        }
+        const results = [];
+        for (const f of picked.paths.slice(0, 30)) results.push(await doRepair(f));
+        return json(res, 200, { ok: true, canceled: false, results });
+      } finally {
+        repairing = false;
+      }
+    }
+
+    if (p === '/api/file/repairs' && req.method === 'GET') {
+      return json(res, 200, { ok: true, items: repairHistory });
+    }
+
     const m = p.match(/^\/api\/jobs\/([\w-]+)(\/cancel|\/log|\/forget)?$/);
     if (m) {
       const job = jobs.get(m[1]);
@@ -1072,6 +1227,9 @@ server.on('error', (e) => {
   console.error(e);
   process.exit(1);
 });
+
+// 上次被强杀留下的 .vg-fix-* 临时文件，启动时清掉（只扫下载相关目录）
+cleanupStaleFixes([DEFAULT_OUT, path.join(HOME, 'Downloads'), path.join(HOME, 'Movies')]);
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`视频下载器助手已启动 http://127.0.0.1:${PORT}`);
